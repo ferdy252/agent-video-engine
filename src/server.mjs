@@ -4,8 +4,8 @@ import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {readFile, stat} from 'node:fs/promises';
 import {toolDefinitions} from './api.mjs';
 
-const server = new McpServer({name: 'agent-video-engine', version: '1.0.0'}, {
-  instructions: 'Local headless video editor. Inspect the project revision before changes. Import source footage by reference, use source-timed word IDs for edits, and inspect source/edited previews. Rendering is asynchronous: poll job_get. The engine performs deterministic edits; editorial decisions belong to the agent. No uploads, publication or model downloads. Custom Remotion compositions can be registered through set_custom for unique motion graphics. See the engine README for the operation schema.',
+const server = new McpServer({name: 'agent-video-engine', version: '1.1.0'}, {
+  instructions: 'Local headless video editor. Inspect the project revision before changes. Import source footage by reference, use source-timed word IDs for edits, and inspect source/edited previews. Use review_cuts to flag transcript timing and mixed-audio risks at timeline joins and generate short review clips. Reviews never change the edit and are evidence for review, not a verdict on naturalness. Rendering, transcription and cut reviews are asynchronous: poll job_get. The engine performs deterministic edits; editorial decisions belong to the agent. No uploads, publication or model downloads. Custom Remotion compositions can be registered through set_custom for unique motion graphics. See the engine README for the operation schema.',
 });
 for (const tool of toolDefinitions) {
   server.registerTool(tool.name, {description: tool.description, inputSchema: tool.schema, annotations: tool.annotations}, async args => {

@@ -116,6 +116,16 @@ export const toolDefinitions = [
   {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Always creates a new output and preserves originals and accepted exports.',
     schema: {projectDir, expectedRevision, outputPath: z.string().optional(), concurrency: z.number().int().min(1).max(8).optional()}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
+  {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Custom compositions require their own review because their timing may differ from the engine timeline.',
+    schema: {projectDir, expectedRevision, contextSeconds: z.number().min(0.25).max(3).default(1),
+      offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20),
+      renderPreviews: z.boolean().default(true).describe('When false, perform transcript timing review only; audio is explicitly skipped.')}, annotations: edit,
+    run: async args => {
+      const project = await loadProject(args.projectDir);
+      if (project.revision !== args.expectedRevision) throw Object.assign(new Error('Project revision changed. Inspect it before reviewing.'), {code: 'STALE_REVISION'});
+      if (project.custom) throw Object.assign(new Error('Custom compositions can use their own timing. Review their rendered output directly, or switch to the engine timeline before using review_cuts.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
+      return startJob(args.projectDir, {...args, type: 'review_cuts'});
+    }},
   {name: 'job_list', description: 'List saved local render and transcription jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},
   {name: 'job_get', description: 'Read job progress, result paths or actionable errors. Completed still previews can be returned as images.',
     schema: {projectDir, jobId: z.string(), includePreview: z.boolean().optional()}, annotations: ro, run: ({projectDir: dir, jobId}) => getJob(dir, jobId)},

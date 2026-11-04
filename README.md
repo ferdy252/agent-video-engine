@@ -90,7 +90,7 @@ The response includes the asset ID and new revision. Use those returned values i
 2. Add media and import a timestamped transcript, or start local transcription.
 3. Read transcript words and inspect source previews before choosing cuts.
 4. Apply edits using the current `expectedRevision`.
-5. Render previews, review the results and revise.
+5. Run `review_cuts`, inspect the report and short join previews, then revise.
 6. Validate the project and render a new final export.
 
 Every successful edit batch creates a revision. Invalid batches and stale revisions leave the project unchanged. Restoring an earlier revision creates a new revision and preserves the intervening history.
@@ -116,6 +116,7 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `source_preview` | `projectDir`, `expectedRevision`, `assetId`, optional `kind`, `sourceStart`, `sourceEnd`, `scale` |
 | `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale` |
 | `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency` |
+| `review_cuts` | `projectDir`, `expectedRevision`; optional preview context, batch offset/limit and timing-only mode |
 | `job_list` | `projectDir` |
 | `job_get` | `projectDir`, `jobId`, optional `includePreview` |
 | `job_cancel`, `job_retry` | `projectDir`, `jobId` |
@@ -123,6 +124,31 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 Preview `kind` is `still` or `preview`. Frame ranges use output frames; source preview bounds use source seconds. Transcription and rendering return durable job IDs. Follow `job_get` until completion, failure or cancellation. Completed stills can be returned as MCP images using `includePreview`.
 
 Detached workers preserve jobs after a client disconnects. A local loopback socket serializes workers to limit concurrent resource use. Job metadata is saved under the project's `.engine/jobs/`; shared worker state defaults to the engine's `.cache/`, configurable with `VIDEO_ENGINE_RUNTIME`. Failed or interrupted jobs can be retried when their original project revision remains current.
+
+## Review speech cuts
+
+`review_cuts` reviews discontinuous joins in the built-in timeline without changing its project or revision. Contiguous splits of the same source with unchanged playback and layout are omitted. It returns a durable job ID; use `job_get` to read the completed report and preview paths.
+
+```json
+{
+  "projectDir": "/absolute/path/video-project",
+  "expectedRevision": 3,
+  "contextSeconds": 1,
+  "offset": 0,
+  "limit": 20,
+  "renderPreviews": true
+}
+```
+
+The report identifies each join in output frames and seconds, and both sides in original source time. It flags boundaries inside timestamped words, large audio-level changes and long silence near a join. Audio measurements use the rendered master, including music, overlays, volume and playback rate. They are cues for review, not proof of a clipped syllable or an unnatural edit.
+
+Previews include approximately `contextSeconds` on each side, rounded to whole frames and clamped to the composition bounds. The default is one second per side; supported values are 0.25 to 3 seconds. Reviews are paginated: `offset` starts at zero and `limit` defaults to 20, with a maximum of 50 joins per job. Continue with the returned `nextOffset` when `hasMore` is true. This bounds rendering work on long videos.
+
+The default audio checks compare 150 ms RMS windows and flag level changes of at least 12 dB when both sides are above the -45 dBFS silence floor. Quiet gaps of at least 0.4 seconds are flagged. Stereo channels are measured by energy, preserving opposite-phase audio. Reports mark truncated measurement windows, silence that reaches a preview edge and neighboring cuts that limit attribution. These fixed heuristics describe the mixed master; they do not classify speech or intentional pauses.
+
+Use `renderPreviews: false` for transcript timing review without rendering or audio analysis. Missing transcripts, absent audio and measurements limited by preview context are reported explicitly. Review files stay under the project's ignored `.engine/reviews/` directory. Cancellation preserves the original edit and removes incomplete review output.
+
+Custom compositions can ignore or change the engine's timeline, so they are rejected with `UNSUPPORTED_CUSTOM_REVIEW` rather than given misleading join timestamps. Review their rendered output directly, or use the built-in timeline.
 
 ## Edit operations
 

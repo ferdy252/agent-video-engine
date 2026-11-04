@@ -70,6 +70,10 @@ try {
       result = {transcriptPath: output.transcriptPath, wordCount: output.transcript.words.length,
         cached: output.cached, applied: false, message: 'Project changed. Import the saved transcript into the current revision.'};
     }
+  } else if (job.type === 'review_cuts') {
+    const {reviewCuts} = await import('./cut-review.mjs');
+    result = await reviewCuts(job.snapshot, {...job.request, projectDir,
+      outputDir: join(projectDir, '.engine/reviews', id), signal: controller.signal, onProgress});
   } else if (job.type === 'render') {
     const {renderProject} = await import('./render.mjs');
     let renderSnapshot = job.snapshot;
