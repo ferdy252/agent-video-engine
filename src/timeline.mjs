@@ -1,3 +1,5 @@
+import {resolveAudioSettings} from './audio-settings.mjs';
+
 /** Compile one source-linked edit into the common output frame clock. */
 export function compileTimeline(project) {
   const {fps, width, height} = project.settings;
@@ -39,6 +41,7 @@ export function compileTimeline(project) {
     captions,
     settings: project.settings,
     captionsStyle: project.captions,
+    audio: resolveAudioSettings(project.audio),
     assets: project.assets,
     custom: project.custom,
   };

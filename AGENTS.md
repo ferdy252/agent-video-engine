@@ -13,6 +13,8 @@ Read `README.md` for the beginner overview and `docs/technical-reference.md` for
 - Preserve native transcript timing and raw evidence. Never infer a missing speech duration merely to permit a cut.
 - Source indexes describe original recordings independently of timeline edits. Keep their output bounded, invalidate them when source or transcript changes, and bump the index algorithm version when analysis or sampling semantics change.
 - Treat repeated passages as possible alternatives. Take grouping must never select a best delivery or change the edit automatically.
+- Audio finishing is opt-in and reversible. Preserve manual clip adjustments, share constant gains across nearby source fragments, and never normalize a short preview separately from the complete mix.
+- Preserve floating-point audio headroom through intermediate mixing. Measure encoded output peaks, distinguish requested from achieved loudness, and report silence or insufficient measurements explicitly.
 
 ## Runtime boundaries
 

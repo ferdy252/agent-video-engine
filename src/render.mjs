@@ -1,16 +1,18 @@
 import {createServer} from 'node:http';
 import {createReadStream} from 'node:fs';
-import {access, link, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat} from 'node:fs/promises';
+import {access, link, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, writeFile} from 'node:fs/promises';
 import {constants} from 'node:fs';
-import {basename, dirname, extname, isAbsolute, join, resolve} from 'node:path';
+import {basename, delimiter, dirname, extname, isAbsolute, join, resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {bundle} from './bundle.mjs';
-import {makeCancelSignal, openBrowser, renderMedia, renderStill, selectComposition} from '@remotion/renderer';
+import {makeCancelSignal, openBrowser, renderMedia, renderStill, selectComposition, RenderInternals} from '@remotion/renderer';
 import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
-import {assertAssets, run} from './media.mjs';
+import {assertAssets, run, toolEnv} from './media.mjs';
+import {resolveAudioSettings} from './audio-settings.mjs';
+import {analyzeAudio, finishAudioMaster, prepareVoiceGains} from './audio-processing.mjs';
 
 const engineRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const contentTypes = {'.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
@@ -200,6 +202,167 @@ async function verifyOutput(file, {kind, dimensions, frames, fps, signal}) {
   return {probe: 'passed', frames: 1, ...dimensions};
 }
 
+const audioSampleRate = 48000;
+const audioFailure = (message, code = 'AUDIO_VERIFICATION_FAILED') => Object.assign(new Error(message), {code});
+const shellQuote = (value) => `'${value.replaceAll("'", "'\"'\"'")}'`;
+
+// Pinned Remotion writes signed 16-bit WAVs at both the per-track gain and mix
+// stages. Its ffmpegOverride does not reach those stages (or audio-only output).
+// A render-local exec shim keeps gain and mixing stages in float, so peaks
+// above 0 dBFS survive until the complete-master gain is applied. No
+// installed package is changed. exec also preserves native cancellation.
+async function floatAudioBinaries(work, signal) {
+  if (process.platform === 'win32') throw audioFailure(
+    'Audio finishing currently requires macOS or Linux for its floating-point render bridge. Disable audio.enabled on Windows.',
+    'UNSUPPORTED_AUDIO_PLATFORM');
+  const bundledBinary = RenderInternals.getExecutablePath({type: 'ffmpeg', binariesDirectory: null, indent: false, logLevel: 'error'});
+  const directory = dirname(bundledBinary);
+  // The bundled minimal FFmpeg does not include the float PCM encoder. Use the
+  // same explicitly installed full FFmpeg required by analysis and finishing.
+  let binary;
+  for (const entry of toolEnv.PATH.split(delimiter)) {
+    if (!entry) continue;
+    const candidate = join(entry, 'ffmpeg');
+    if (await executable(candidate)) {binary = await realpath(candidate); break;}
+  }
+  if (!binary) throw audioFailure('Install FFmpeg with floating-point PCM support before enabling audio finishing.', 'AUDIO_FFMPEG_MISSING');
+  const filterProbe = join(work, 'audio-filter-capability.txt');
+  await writeFile(filterProbe, 'anull');
+  let modernFileOptions = true;
+  try {
+    await run(binary, ['-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+      '-/filter:a', filterProbe, '-t', '0.001', '-c:a', 'pcm_f32le', '-f', 'null', '-'], {signal});
+  } catch {
+    checkAbort(signal);
+    modernFileOptions = false;
+  }
+  const local = join(work, 'float-audio-binaries');
+  await mkdir(local);
+  for (const name of await readdir(directory)) {
+    if (name !== basename(bundledBinary)) await symlink(join(directory, name), join(local, name));
+  }
+  // Keep graphs in files, including long frame-varying volume expressions.
+  // FFmpeg 8+ removed legacy script flags in favor of generic file arguments.
+  const simpleOption = modernFileOptions ? '-/filter:a' : '-filter_script:a';
+  const complexOption = modernFileOptions ? '-/filter_complex' : '-filter_complex_script';
+  const wrapper = `#!/bin/sh\nunset DYLD_LIBRARY_PATH\nread_filter=0\nfor arg do\n  shift\n  if [ "$read_filter" = 1 ]; then\n    /usr/bin/sed 's/sample_fmts=s16/sample_fmts=flt/g' "$arg" > "$arg.float" || exit 1\n    set -- "$@" "$arg.float"\n    read_filter=0\n  else\n    case "$arg" in\n      pcm_s16le) set -- "$@" pcm_f32le ;;\n      -filter_script:a) set -- "$@" ${simpleOption}; read_filter=1 ;;\n      -filter_complex_script) set -- "$@" ${complexOption}; read_filter=1 ;;\n      *) set -- "$@" "$arg" ;;\n    esac\n  fi\ndone\nexec ${shellQuote(binary)} "$@"\n`;
+  await writeFile(join(local, basename(bundledBinary)), wrapper, {mode: 0o755});
+  return local;
+}
+
+async function verifyFloatMaster(file, {frames, fps, signal}) {
+  const {stdout} = await run('ffprobe', ['-v', 'error', '-show_entries',
+    'stream=codec_name,codec_type,sample_rate,duration:format=duration', '-of', 'json', file], {signal});
+  const probe = JSON.parse(stdout), audio = probe.streams?.find((stream) => stream.codec_type === 'audio');
+  if (audio?.codec_name !== 'pcm_f32le' || Number(audio.sample_rate) !== audioSampleRate) {
+    throw audioFailure('The full audio master must remain 48 kHz floating-point PCM before finishing.');
+  }
+  const duration = Number(audio.duration ?? probe.format?.duration);
+  if (!Number.isFinite(duration) || Math.abs(duration - frames / fps) > 1 / audioSampleRate + 1e-6) {
+    throw audioFailure('The full audio master duration does not match the composition clock.');
+  }
+}
+
+async function encodeFullMaster(master, output, signal) {
+  await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-i', master,
+    '-map', '0:a:0', '-vn', '-c:a', 'aac', '-b:a', '192k', '-ar', String(audioSampleRate),
+    '-ac', '2', '-movflags', '+faststart', '-map_metadata', '-1', output], {signal});
+  return analyzeAudio(output, {signal});
+}
+
+async function muxMasterRange(video, master, output, frameRange, fps, signal) {
+  const start = Math.round(frameRange[0] / fps * audioSampleRate);
+  const end = Math.round((frameRange[1] + 1) / fps * audioSampleRate);
+  const samples = end - start;
+  await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-i', video, '-i', master,
+    '-filter_complex', `[1:a:0]atrim=start_sample=${start}:end_sample=${end},asetpts=PTS-STARTPTS,apad=whole_len=${samples},atrim=end_sample=${samples}[finished]`,
+    '-map', '0:v:0', '-map', '[finished]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+    '-ar', String(audioSampleRate), '-ac', '2', '-t', String((frameRange[1] - frameRange[0] + 1) / fps),
+    '-map_metadata', '-1', '-movflags', '+faststart', output], {signal});
+  return analyzeAudio(output, {signal});
+}
+
+const exceedsCeiling = (analysis, ceiling) => analysis.truePeakDb !== null && analysis.truePeakDb > ceiling;
+const assertMeasuredOutput = (analysis) => {
+  if (!analysis.hasAudio || (!analysis.silent && analysis.truePeakDb === null)) {
+    throw audioFailure('The encoded output has no verifiable audio peak measurement.');
+  }
+};
+
+async function renderFinishedAudio({common, work, composition, concurrency, frameRange,
+  partial, kind, settings, voice, signal, onProgress}) {
+  const raw = join(work, 'master-raw.wav'), finished = join(work, 'master-finished.wav');
+  const binariesDirectory = await floatAudioBinaries(work, signal);
+  report(onProgress, {stage: 'audio_master', progress: 0});
+  await renderMedia({...common, outputLocation: raw, codec: 'wav', audioCodec: 'pcm-16',
+    sampleRate: audioSampleRate, binariesDirectory, enforceAudioTrack: true, concurrency,
+    frameRange: [0, composition.durationInFrames - 1],
+    onProgress: (update) => report(onProgress, {stage: 'audio_master', ...update})});
+  checkAbort(signal);
+  await verifyFloatMaster(raw, {frames: composition.durationInFrames, fps: composition.fps, signal});
+  const masterReport = await finishAudioMaster(raw, finished, settings, {signal,
+    onProgress: (update) => report(onProgress, {...update, stage: 'audio_finish'})});
+  checkAbort(signal);
+  const video = join(work, 'video-muted.mp4');
+  await renderMedia({...common, outputLocation: video, codec: 'h264', pixelFormat: 'yuv420p',
+    frameRange, concurrency, crf: kind === 'preview' ? 25 : 18, muted: true, colorSpace: 'bt709',
+    onProgress: (update) => report(onProgress, {stage: 'render', ...update})});
+  let currentMaster = finished, additionalGainDb = 0, encoded, fullEncoded;
+  // Only the complete AAC master determines common gain. A range-specific
+  // encoding boundary must never silently alter the level of a preview.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    checkAbort(signal);
+    report(onProgress, {stage: 'audio_verify', progress: attempt / 4});
+    fullEncoded = await encodeFullMaster(currentMaster, join(work, `master-encoded-${attempt}.m4a`), signal);
+    assertMeasuredOutput(fullEncoded);
+    const candidate = join(work, `mux-${attempt}.mp4`);
+    if (!exceedsCeiling(fullEncoded, settings.truePeakDb)) {
+      encoded = await muxMasterRange(video, currentMaster, candidate, frameRange, composition.fps, signal);
+      assertMeasuredOutput(encoded);
+      if (exceedsCeiling(encoded, settings.truePeakDb)) {
+        const reductionDb = Math.ceil((encoded.truePeakDb - settings.truePeakDb + .3) * 10) / 10;
+        // If the master was already peak-limited, a small reduction of the
+        // requested gain might still sit above the active cap and do nothing.
+        const recommended = Math.min(settings.outputGainDb - reductionDb,
+          masterReport.appliedGainDb + additionalGainDb - (masterReport.automaticGainDb ?? 0) - reductionDb);
+        const recommendedOutputGainDb = Math.max(-24, Math.floor(recommended * 10) / 10);
+        throw Object.assign(audioFailure(
+          `The requested AAC range exceeds the peak ceiling at its encoding boundary. Set audio.outputGainDb to ${recommendedOutputGainDb} dB or lower, then render both preview and export again. No output was exported.`,
+          'AUDIO_RANGE_PEAK_LIMIT'), {details: {truePeakDb: encoded.truePeakDb,
+          ceilingDb: settings.truePeakDb, recommendedOutputGainDb}});
+      }
+    } else encoded = undefined;
+    const highestPeak = fullEncoded.truePeakDb ?? -Infinity;
+    if (highestPeak <= settings.truePeakDb) {
+      await link(candidate, partial);
+      const finalMaster = additionalGainDb === 0 ? masterReport.after : await analyzeAudio(currentMaster, {signal});
+      return {enabled: true, settings, scope: 'full_timeline_master', voice,
+        master: {...masterReport, after: finalMaster,
+          appliedGainDb: masterReport.appliedGainDb + additionalGainDb,
+          peakLimited: masterReport.peakLimited || additionalGainDb < 0,
+          status: additionalGainDb < 0 && masterReport.before.status === 'measured' ? 'peak_limited' : masterReport.status,
+          targetReached: finalMaster.integratedLufs === null ? null
+            : Math.abs(finalMaster.integratedLufs - (settings.targetLufs + settings.outputGainDb)) <= .5},
+        encoded, encodedScope: 'requested_frame_range', frameRange,
+        fullMasterEncoded: fullEncoded, sampleRate: audioSampleRate, codec: 'aac',
+        peakSafety: {ceilingDb: settings.truePeakDb, passed: true, attempts: attempt + 1, additionalGainDb,
+          gainScope: 'full_timeline_master', rangeVerified: true},
+        limitations: ['Audio is finished once against the complete timeline, including custom-layer audio and overlays. The requested frame range is sliced from that master.',
+          'Lossy-encoding peak protection can reduce the common master gain. This is numerical verification, not listening approval.']};
+    }
+    if (attempt === 3) break;
+    const correction = settings.truePeakDb - highestPeak - .3;
+    additionalGainDb += correction;
+    const corrected = join(work, `master-corrected-${attempt}.wav`);
+    await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-i', currentMaster,
+      '-map', '0:a:0', '-vn', '-af', `volume=${correction}dB`, '-ar', String(audioSampleRate),
+      '-ac', '2', '-c:a', 'pcm_f32le', corrected], {signal});
+    currentMaster = corrected;
+  }
+  throw audioFailure('AAC peaks still exceed the configured ceiling after bounded full-master gain reduction. No output was exported.',
+    'AUDIO_PEAK_LIMIT_FAILED');
+}
+
 /** One-shot headless render. Persistence, revisions and job state belong to the caller. */
 export async function renderProject(project, options = {}) {
   const {kind = 'video', signal, onProgress} = options;
@@ -217,7 +380,12 @@ export async function renderProject(project, options = {}) {
   checkAbort(signal);
   validateProject(project);
   await assertAssets(project);
-  const timeline = compileTimeline(project);
+  let timeline = compileTimeline(project);
+  const audioSettings = resolveAudioSettings(project.audio);
+  if (kind !== 'still' && audioSettings.enabled && timeline.custom && timeline.custom.mode !== 'layer') {
+    throw audioFailure('Audio finishing needs the engine timeline. Use custom.mode:"layer" or disable audio.enabled for a standalone custom composition.',
+      'UNSUPPORTED_CUSTOM_AUDIO');
+  }
   if ((!timeline.custom || timeline.custom.mode === 'layer') && timeline.durationInFrames < 1) {
     throw new Error('Add at least one clip or overlay before rendering');
   }
@@ -231,6 +399,14 @@ export async function renderProject(project, options = {}) {
     const output = await targetPath(resolve(options.outputPath), server.sourcePaths);
     work = await mkdtemp(join(dirname(output), '.agent-video-render-'));
     const partial = join(work, `render${extension}`);
+    let audio;
+    if (kind !== 'still') {
+      const prepared = await prepareVoiceGains(project, timeline, {signal,
+        onProgress: (update) => report(onProgress, {...update, stage: 'audio_voice'})});
+      timeline = prepared.timeline;
+      audio = {enabled: false, settings: audioSettings, scope: 'manual_clip_gains', voice: prepared.report,
+        limitations: ['Automatic voice leveling and complete-master finishing are disabled. Saved manual clip gains still apply.']};
+    }
     const custom = timeline.custom;
     const customMode = custom?.mode ?? 'composition';
     let customLayer;
@@ -280,10 +456,15 @@ export async function renderProject(project, options = {}) {
         : composition.durationInFrames - 1, composition.durationInFrames, 'toFrame');
       if (to < from) throw new Error('toFrame must be at or after fromFrame (inclusive)');
       frameRange = [from, to];
-      await renderMedia({...common, outputLocation: partial, codec: 'h264', pixelFormat: 'yuv420p',
-        frameRange, concurrency, crf: kind === 'preview' ? 25 : 18, audioBitrate: '192k',
-        enforceAudioTrack: true, colorSpace: 'bt709',
-        onProgress: (progress) => report(onProgress, {stage: 'render', ...progress})});
+      if (audioSettings.enabled) {
+        audio = await renderFinishedAudio({common, work, composition, concurrency, frameRange, partial,
+          kind, settings: audioSettings, voice: audio.voice, signal, onProgress});
+      } else {
+        await renderMedia({...common, outputLocation: partial, codec: 'h264', pixelFormat: 'yuv420p',
+          frameRange, concurrency, crf: kind === 'preview' ? 25 : 18, audioBitrate: '192k',
+          enforceAudioTrack: true, colorSpace: 'bt709',
+          onProgress: (progress) => report(onProgress, {stage: 'render', ...progress})});
+      }
     }
     checkAbort(signal);
     const info = await stat(partial);
@@ -300,7 +481,7 @@ export async function renderProject(project, options = {}) {
     report(onProgress, {stage: 'complete', progress: 1});
     return {outputPath: output, kind, revision: project.revision, bytes: info.size,
       compositionId, ...(custom ? {customMode} : {}), durationInFrames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1,
-      fps: composition.fps, ...dimensions, verification,
+      fps: composition.fps, ...dimensions, verification, ...(audio ? {audio} : {}),
       ...(frame === undefined ? {frameRange} : {frame})};
   } catch (error) {
     if (signal?.aborted) throw abortError();

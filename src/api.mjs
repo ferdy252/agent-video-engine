@@ -8,13 +8,25 @@ import {probeAsset, doctor, assertAssets} from './media.mjs';
 import {normalizeTranscript} from './transcribe.mjs';
 import {startJob, getJob, cancelJob, retryJob, listJobs} from './jobs.mjs';
 import {importLegacyProject} from './import-legacy.mjs';
+import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
 const ro = {readOnlyHint: true, destructiveHint: false, openWorldHint: false};
 const edit = {readOnlyHint: false, destructiveHint: false, openWorldHint: false};
+const audioNumber = (key) => z.number().min(AUDIO_LIMITS[key][0]).max(AUDIO_LIMITS[key][1]).optional();
+const audioPatch = z.object({
+  enabled: z.boolean().optional().describe('Enable automatic main-track leveling and complete-mix loudness finishing. Off by default.'),
+  targetLufs: audioNumber('targetLufs'), truePeakDb: audioNumber('truePeakDb'),
+  strength: audioNumber('strength').describe('Automatic take-level matching strength, from 0 to 1. Constant gains preserve delivery within a source span.'),
+  maxGainDb: audioNumber('maxGainDb'),
+  voiceGainDb: audioNumber('voiceGainDb').describe('Main-track voice balance relative to music and effects. For overall loudness, change outputGainDb.'),
+  outputGainDb: audioNumber('outputGainDb').describe('Overall adjustment after automatic target gain. Negative values make the result quieter; peak protection still applies.'),
+}).strict();
+const clipAudioPatch = z.object({leveling: z.boolean().optional(), gainDb: z.number().min(-24).max(24).optional()}).strict();
 const clipSchema = z.object({id: z.string(), assetId: z.string(), sourceStart: z.number().nonnegative(), sourceEnd: z.number().positive(),
   playbackRate: z.number().min(0.01).max(16).optional(), volume: z.number().min(0).max(8).optional(), fit: z.enum(['cover', 'contain']).optional(),
+  audio: clipAudioPatch.optional(),
   position: z.object({x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive()}).optional()}).strict();
 const captionPatch = z.object({enabled: z.boolean().optional(), fontSize: z.number().positive().optional(), color: z.string().optional(),
   highlightColor: z.string().optional(), bottom: z.number().nonnegative().optional(), wordsPerPage: z.number().int().min(1).max(50).optional()}).strict();
@@ -39,6 +51,8 @@ const operationSchema = z.discriminatedUnion('type', [
   z.object({type: z.literal('upsert_overlay'), overlay: overlaySchema}).strict(),
   z.object({type: z.literal('remove_overlay'), overlayId: z.string()}).strict(),
   z.object({type: z.literal('set_captions'), patch: captionPatch}).strict(),
+  z.object({type: z.literal('set_audio'), patch: audioPatch}).strict(),
+  z.object({type: z.literal('set_clip_audio'), clipId: z.string(), patch: clipAudioPatch}).strict(),
   z.object({type: z.literal('set_settings'), patch: z.object({width: z.number().int().min(2).max(16384).optional(), height: z.number().int().min(2).max(16384).optional(),
     fps: z.number().int().min(1).max(120).optional(), background: z.string().optional()}).strict()}).strict(),
   z.object({type: z.literal('set_custom'), custom: customSchema.nullable()}).strict(),
@@ -46,7 +60,7 @@ const operationSchema = z.discriminatedUnion('type', [
 async function inspect({projectDir: dir, includeTimeline = false}) {
   const project = await loadProject(dir);
   const timeline = compileTimeline(project);
-  return {...project, transcripts: project.transcripts.map(({words, ...rest}) => ({...rest, wordCount: words.length})),
+  return {...project, audio: resolveAudioSettings(project.audio), transcripts: project.transcripts.map(({words, ...rest}) => ({...rest, wordCount: words.length})),
     durationInFrames: timeline.durationInFrames, duration: timeline.durationInFrames / timeline.fps,
     ...(includeTimeline ? {timeline} : {})};
 }
@@ -65,8 +79,8 @@ export const toolDefinitions = [
     schema: {projectDir, path: z.string().min(1), name: z.string().optional()}, annotations: edit,
     run: ({projectDir: dir, ...options}) => importLegacyProject(dir, options)},
   {name: 'project_create', description: 'Create a new local headless video project. Existing directories and media are preserved.',
-    schema: {projectDir, name: z.string().min(1), width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), fps: z.number().int().min(1).max(120).optional()}, annotations: edit,
-    run: ({projectDir: dir, name, ...settings}) => createProject(dir, {name, settings})},
+    schema: {projectDir, name: z.string().min(1), width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), fps: z.number().int().min(1).max(120).optional(), audio: audioPatch.optional()}, annotations: edit,
+    run: ({projectDir: dir, name, audio, ...settings}) => createProject(dir, {name, settings, audio})},
   {name: 'project_inspect', description: 'Read project state and revision. Include the compiled timeline to inspect edited timing and retimed captions.',
     schema: {projectDir, includeTimeline: z.boolean().optional()}, annotations: ro, run: inspect},
   {name: 'project_validate', description: 'Validate timeline and confirm originals still match imported fingerprints. Does not judge creative quality.',
@@ -104,7 +118,7 @@ export const toolDefinitions = [
     schema: {projectDir, indexId: z.string(), query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
-  {name: 'edit_apply', description: 'Apply an atomic batch of source-linked edits. Operations: set_clips, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words, upsert_overlay, remove_overlay, set_captions, set_settings, set_custom. Invalid batches make no change. Originals are never changed.',
+  {name: 'edit_apply', description: 'Apply an atomic batch of source-linked edits. Operations: set_clips, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words, upsert_overlay, remove_overlay, set_captions, set_settings, set_custom, set_audio, set_clip_audio. set_audio enables/disables automatic voice leveling and sets targetLufs, truePeakDb, strength, maxGainDb, voiceGainDb (voice/music balance) and outputGainDb (overall louder/quieter). set_clip_audio sets leveling:false to exempt a non-speech clip and gainDb for manual take adjustments. Manual clip gains work even with automatic finishing off. Saved settings support revisions and undo. Invalid batches make no change. Originals are never changed.',
     schema: {projectDir, expectedRevision, operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: async ({projectDir: dir, ...request}) => {const project = await applyOperations(dir, request); return {revision: project.revision, clips: project.clips, durationInFrames: compileTimeline(project).durationInFrames};}},
   {name: 'revision_list', description: 'List saved edit revisions.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listRevisions(dir)},
@@ -132,13 +146,13 @@ export const toolDefinitions = [
   {name: 'transcribe', description: 'Start cached, local word transcription with whisper.cpp. Returns a durable job ID. Never uploads footage or downloads models. Applies results only if the project revision is unchanged.',
     schema: {projectDir, expectedRevision, assetId: z.string(), modelPath: z.string().optional(), language: z.string().default('en')}, annotations: edit,
     run: args => startJob(args.projectDir, {...args, type: 'transcribe'})},
-  {name: 'preview_render', description: 'Render a still frame or short moving preview of the current edit. Returns a durable job ID. Use job_get to inspect the resulting image or video path.',
+  {name: 'preview_render', description: 'Render a still frame or short moving preview of the current edit. Enabled audio finishing uses the full project mix so short previews retain the same settings and master level as the final export. Returns a durable job ID. Use job_get for the result, audio measurements and any peak-limited target warnings.',
     schema: {projectDir, expectedRevision, kind: z.enum(['still', 'preview']).default('still'), frame: z.number().int().nonnegative().optional(), fromFrame: z.number().int().nonnegative().optional(), toFrame: z.number().int().nonnegative().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args)},
-  {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit.',
+  {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit. Bypasses audio finishing and manual edit gains so it represents the original recording.',
     schema: {projectDir, expectedRevision, assetId: z.string(), kind: z.enum(['still', 'preview']).default('still'), sourceStart: z.number().nonnegative().default(0), sourceEnd: z.number().positive().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args, true)},
-  {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Always creates a new output and preserves originals and accepted exports.',
+  {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Enabled automatic audio finishing levels main-track voice with saved adjustable controls, includes music/custom-layer audio in the master, and measures the encoded result. Always creates a new output and preserves originals and accepted exports.',
     schema: {projectDir, expectedRevision, outputPath: z.string().optional(), concurrency: z.number().int().min(1).max(8).optional()}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
   {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Supports the built-in timeline and custom layer mode, where the engine owns timing and main clips. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Independent standalone compositions require adaptation to layer mode.',

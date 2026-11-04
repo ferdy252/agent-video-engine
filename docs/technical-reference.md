@@ -155,6 +155,45 @@ Video maps sample across the recording and near attempted passages. They adapt s
 
 Indexes are private derived files under `.engine/indexes/`. Cache identity includes the source content fingerprint, transcript words and timings, asset/project identity, sampling options and algorithm version. Normal timeline edits can reuse the same map. Changed source media or transcript makes an old map stale; build a new index before using it. Missing transcripts are reported explicitly: video receives a visual-only map, while audio receives metadata only. Neither triggers a hidden model download or transcription call. Cancellation removes partial work. No original media is copied into the index.
 
+## Automatic audio leveling and manual adjustments
+
+Audio finishing is opt-in. Enable it at project creation with `audio: {"enabled": true}`, or save controls with `edit_apply`:
+
+```json
+{
+  "projectDir": "/absolute/path/video-project",
+  "expectedRevision": 3,
+  "operations": [
+    {"type": "set_audio", "patch": {"enabled": true}},
+    {"type": "set_clip_audio", "clipId": "take-2", "patch": {"gainDb": -3}}
+  ]
+}
+```
+
+`project_inspect` returns the current audio settings. These edits use the same revision checks, atomic batches and undo history as other operations. Existing projects without audio settings retain their previous sound.
+
+| Project `audio` control | Default | Range or meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Enable automatic main-track matching and complete-mix finishing |
+| `targetLufs` | `-16` | Target loudness, from `-36` to `-9` |
+| `truePeakDb` | `-1.5` | Maximum encoded output peak, from `-9` to `-0.5` dBTP |
+| `strength` | `1` | Main-track matching strength, from `0` to `1` |
+| `maxGainDb` | `9` | Automatic boost limit, from `0` to `24` dB; also bounds take-matching adjustments |
+| `voiceGainDb` | `0` | Main-track balance relative to music/effects, from `-24` to `24` dB |
+| `outputGainDb` | `0` | Overall adjustment after calculating target gain, from `-24` to `24` dB |
+
+For “make the video quieter,” lower `outputGainDb`. For voice/music balance, use `voiceGainDb` or overlay volume. A fixed whole-mix target can counteract a global voice change when voice is the only sound, so `voiceGainDb` is not the overall-volume control.
+
+For one take, use `set_clip_audio` with manual `gainDb` from `-24` to `24`, or `leveling: false` to exclude it from automatic matching. These fields also work in `set_clips` under each clip's `audio` object. Existing clip `volume` is preserved and multiplies manual gain. Manual clip adjustments remain active when global finishing is off; global voice/output controls apply only while it is on.
+
+Automatic matching assumes that main-track audio contains voice. It measures source spans and applies a bounded constant gain. Nearby source fragments share an adjustment so deleting a word does not make every small fragment a new take. Short, silent or unmeasurable spans receive no automatic take gain. Put music/effects in overlays or exclude non-speech main clips. This feature does not detect speech, remove noise or repair distorted recordings.
+
+Moving previews and exports render the complete composition's audio first, including overlays and custom-layer sound. Floating-point intermediates preserve mixing headroom. One constant gain then approaches the requested loudness while reserving peak headroom, preserving the mix's dynamics. Short previews use a range from this complete master; they are not independently normalized. If an exceptional AAC slice boundary exceeds the peak ceiling, rendering stops with an adjustment recommendation instead of silently changing that preview's level. Still images skip audio processing, and `source_preview` bypasses all edit gains and finishing.
+
+Read the completed render job's `result.audio` report for source-span gains, requested versus achieved master loudness, actual encoded-file measurements and peak verification. Peak protection and boost limits can make a target unreachable; the report makes that explicit. Verification measures the real output and does not replace listening. Temporary audio masters are deleted after rendering or cancellation; no persistent audio cache or original-file rewrite is created.
+
+Automatic finishing supports the built-in composition and custom `mode: "layer"`. Independent composition mode must be adapted or have finishing disabled. The floating-point render bridge requires a POSIX shell and is verified on macOS. Automatic finishing reports an actionable error on Windows; other operating systems remain unverified.
+
 ## Review speech cuts
 
 `review_cuts` reviews discontinuous joins in the engine timeline, including custom layer mode, without changing its project or revision. Contiguous splits of the same source with unchanged playback and layout are omitted. It returns a durable job ID; use `job_get` to read the completed report and preview paths.
@@ -197,9 +236,11 @@ Custom motion registered with `mode: "layer"` shares the engine clock and is sup
 | `remove_overlay` | `overlayId` |
 | `set_captions` | `patch` with caption-style fields |
 | `set_settings` | `patch` with output settings |
+| `set_audio` | `patch` with automatic leveling and output-loudness controls |
+| `set_clip_audio` | `clipId`, `patch` with `leveling` and/or manual `gainDb` |
 | `set_custom` | `custom` composition metadata, or `null` to use the built-in composition |
 
-A main clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. `fit` can also be `"contain"`. Optional `position` contains pixel values `{x,y,width,height}`.
+A main clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. `fit` can also be `"contain"`. Optional `position` contains pixel values `{x,y,width,height}`. Optional `audio` contains `leveling` (default `true`) and manual `gainDb` (default `0`). Manual clip gain multiplies the existing `volume` and also works with automatic finishing disabled.
 
 An overlay has `id`, `type`, `start` and `end`. Its type is `text`, `image`, `video` or `audio`. Text overlays need `text`; other types need an appropriate `assetId`. Timed overlays support optional `sourceStart` and `volume`. The `style` object supports positioning, size, opacity, crop, typography and `fadeInFrames`/`fadeOutFrames`.
 

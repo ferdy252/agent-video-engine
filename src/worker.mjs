@@ -85,7 +85,7 @@ try {
       if (!asset) throw new Error('Unknown source asset');
       const start = job.request.sourceStart ?? 0;
       const end = job.request.sourceEnd ?? (asset.type === 'image' ? start + 1 : Math.min(asset.duration, start + 5));
-      renderSnapshot = {...job.snapshot, custom: undefined, transcripts: [], overlays: [],
+      renderSnapshot = {...job.snapshot, audio: undefined, custom: undefined, transcripts: [], overlays: [],
         settings: {...job.snapshot.settings, width: asset.width || 640, height: asset.height || 360},
         captions: {...job.snapshot.captions, enabled: false}, clips: [{id: 'source-preview', assetId: asset.id,
           sourceStart: start, sourceEnd: end, playbackRate: 1, volume: 1, fit: 'contain'}]};

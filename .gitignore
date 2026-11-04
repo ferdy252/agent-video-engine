@@ -30,6 +30,7 @@ project.json
 .project.lock
 .history/
 .engine/
+.agent-video-render-*/
 .cache/
 cache/
 caches/

@@ -11,6 +11,7 @@ You describe the result you want. The agent makes editing decisions and uses thi
 - Cut, trim and rearrange footage, including cuts based on transcript words.
 - Map possible retakes inside one recording, with timestamps and picture previews.
 - Add captions, text, images, music and sound.
+- Level voice audio automatically, with adjustable volume and per-take controls.
 - Create custom motion graphics that follow the edit.
 - Keep graphics attached to spoken words as the timing changes.
 - Make still previews and short video previews for review.
@@ -63,6 +64,12 @@ Keep recording the way you normally do. The agent can use the transcript to find
 The agent can search a line, preview the different versions and compare your delivery before choosing cuts. Repeated wording is a clue, not a verdict about the best take. The map leaves your recording and edit unchanged.
 
 For tool details, advanced graphics and troubleshooting, see the [technical reference](docs/technical-reference.md).
+
+## Adjust the sound through chat
+
+Ask your agent to enable automatic audio leveling. It can match voice levels across takes and control the finished video's loudness while preserving your original recording.
+
+You can then say "make it quieter," "lower this take," or "turn automatic leveling off." The agent saves those adjustments and creates another preview. Previews use the same complete audio mix as the export, so a short sample is not leveled separately.
 
 ## Licensing
 

@@ -6,6 +6,7 @@ import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
 import {renderProject} from './render.mjs';
 import {toolEnv} from './media.mjs';
+import {resolveAudioSettings, resolveClipAudio} from './audio-settings.mjs';
 
 const invalid = (message) => { throw Object.assign(new Error(message), {code: 'INVALID_REVIEW_REQUEST'}); };
 const abortError = () => Object.assign(new Error('Cut review cancelled'), {name: 'AbortError', code: 'CANCELLED'});
@@ -28,11 +29,14 @@ function wordBoundary(project, clip, sourceTime, side) {
 export function analyzeCutBoundaries(project) {
   if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition may use independent cuts. Adapt its motion to custom.mode="layer" to keep the engine in control of the main timeline.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
   const timeline = compileTimeline(project);
+  const audio = resolveAudioSettings(project.audio);
   const cuts = [];
   for (let index = 1; index < timeline.clips.length; index++) {
     const left = timeline.clips[index - 1], right = timeline.clips[index];
+    const leftAudio = resolveClipAudio(left.audio), rightAudio = resolveClipAudio(right.audio);
     const contiguous = left.assetId === right.assetId && Math.abs(left.sourceEnd - right.sourceStart) < 1e-7 &&
       left.playbackRate === right.playbackRate && left.volume === right.volume && left.fit === right.fit &&
+      leftAudio.gainDb === rightAudio.gainDb && (!audio.enabled || leftAudio.leveling === rightAudio.leveling) &&
       JSON.stringify(left.position ?? null) === JSON.stringify(right.position ?? null);
     if (contiguous) continue;
     const leftWords = wordBoundary(project, left, left.sourceEnd, 'left');

@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {statSync} from 'node:fs';
 import {mkdir, open, readFile, rename, unlink, readdir} from 'node:fs/promises';
 import path from 'node:path';
+import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateClipAudio} from './audio-settings.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
 
@@ -75,6 +76,7 @@ export function validateProject(project) {
   number(project.settings.height, 'settings.height', {min: 2, max: 16384, integer: true});
   number(project.settings.fps, 'settings.fps', {min: 1, max: 120, integer: true});
   string(project.settings.background, 'settings.background');
+  if (project.audio !== undefined) validateAudioSettings(project.audio);
   for (const key of ['assets', 'transcripts', 'clips', 'overlays']) array(project[key], key);
   uniqueIds(project.assets, 'asset');
   uniqueIds(project.clips, 'clip');
@@ -115,6 +117,7 @@ export function validateProject(project) {
     sourceBounds(asset, clip.sourceStart, clip.sourceEnd, `clip ${clip.id}`);
     number(clip.playbackRate, 'clip.playbackRate', {min: 0.01, max: 16});
     number(clip.volume, 'clip.volume', {min: 0, max: 8});
+    if (clip.audio !== undefined) validateClipAudio(clip.audio);
     if (!['cover', 'contain'].includes(clip.fit)) fail('clip.fit must be cover or contain.');
     if (clip.position !== undefined) {
       object(clip.position, 'clip.position');
@@ -268,6 +271,7 @@ export async function createProject(projectDir, options = {}) {
       assets: clone(options.assets ?? []), transcripts: clone(options.transcripts ?? []),
       clips: normalizeClips(clone(options.clips ?? [])), overlays: clone(options.overlays ?? []),
       captions: {...DEFAULT_CAPTIONS, ...options.captions},
+      audio: resolveAudioSettings(options.audio),
       ...(options.custom != null ? {custom: clone(options.custom)} : {}),
     };
     validateProject(project);
@@ -366,6 +370,17 @@ function applyOperation(project, operation) {
     }
     case 'set_captions': object(operation.patch, 'patch'); project.captions = {...project.captions, ...clone(operation.patch)}; break;
     case 'set_settings': object(operation.patch, 'patch'); project.settings = {...project.settings, ...clone(operation.patch)}; break;
+    case 'set_audio': {
+      validateAudioSettings(operation.patch);
+      project.audio = {...resolveAudioSettings(project.audio), ...clone(operation.patch)};
+      break;
+    }
+    case 'set_clip_audio': {
+      validateClipAudio(operation.patch);
+      const clip = project.clips[findClip(project, operation.clipId)];
+      clip.audio = {...resolveClipAudio(clip.audio), ...clone(operation.patch)};
+      break;
+    }
     case 'set_custom': if (operation.custom === null) delete project.custom; else project.custom = clone(operation.custom); break;
     default: fail(`Unknown edit operation: ${type}.`, 'UNKNOWN_OPERATION');
   }
