@@ -26,7 +26,7 @@ function wordBoundary(project, clip, sourceTime, side) {
 
 /** Locate actual discontinuities on the compiled master frame clock. */
 export function analyzeCutBoundaries(project) {
-  if (project.custom) throw Object.assign(new Error('Cut review cannot locate joins in a custom composition that may ignore the compiled main timeline. Use the built-in composition for this review.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
+  if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition may use independent cuts. Adapt its motion to custom.mode="layer" to keep the engine in control of the main timeline.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
   const timeline = compileTimeline(project);
   const cuts = [];
   for (let index = 1; index < timeline.clips.length; index++) {
@@ -213,7 +213,9 @@ export async function reviewCuts(project, {projectDir, outputDir, contextSeconds
       cut.preview = {...preview, fromFrame: previewStart, toFrame: preview.frameRange[1],
         cutFrameInPreview: cut.outputFrame - previewStart, cutTimeInPreview: (cut.outputFrame - previewStart) / timeline.fps};
       const expectedAudio = {left: audibleNear(timeline, cut, 'left'), right: audibleNear(timeline, cut, 'right')};
-      if (!expectedAudio.left || !expectedAudio.right) {
+      const knownAudioOnBothSides = expectedAudio.left && expectedAudio.right;
+      const customLayer = snapshot.custom?.mode === 'layer';
+      if (!knownAudioOnBothSides && !customLayer) {
         cut.audio = {status: 'not_analyzable', evidenceScope: 'mixed_master', expectedAudio,
           reason: 'Audio is not present or is intentionally muted at one or both sides of this join. Silence and level-change flags were not inferred.'};
         continue;
@@ -225,6 +227,14 @@ export async function reviewCuts(project, {projectDir, outputDir, contextSeconds
         continue;
       }
       cut.audio = {...analyzeAudioSamples(decoded.samples, {...decoded, cutSample}), expectedAudio};
+      if (customLayer) {
+        cut.audio.customLayerAudio = 'unknown';
+        if (!knownAudioOnBothSides) {
+          cut.audio.silenceAssessment = 'unassessed_custom_layer_audio_expectation';
+          cut.audio.flags = cut.audio.flags.filter((flag) => flag.code !== 'LONG_SILENCE_NEAR_JOIN');
+          cut.audio.silenceAssessmentNote = 'The custom layer may supply audio. Measured level changes are available, but silence is not classified without known audio on both sides in the engine timeline.';
+        }
+      }
       const nearbyCuts = boundaries.cuts.filter((other) => other.id !== cut.id && Math.abs(other.outputTime - cut.outputTime) < 0.15)
         .map((other) => ({id: other.id, outputTime: other.outputTime}));
       if (nearbyCuts.length) cut.audio.isolationNote = 'Other joins fall inside the audio measurement window; level changes cannot be attributed to this join alone.';
@@ -235,6 +245,7 @@ export async function reviewCuts(project, {projectDir, outputDir, contextSeconds
     const byCode = {};
     for (const cut of cuts) for (const flag of cut.flags) byCode[flag.code] = (byCode[flag.code] ?? 0) + 1;
     const report = {schemaVersion: 1, revision: snapshot.revision, fps: timeline.fps, totalCuts: boundaries.totalCuts,
+      reviewScope: 'engine_main_timeline', customMode: snapshot.custom?.mode ?? (snapshot.custom ? 'composition' : null),
     offset, limit, reviewedCuts: cuts.length, hasMore: offset + cuts.length < boundaries.totalCuts,
     nextOffset: offset + cuts.length < boundaries.totalCuts ? offset + cuts.length : null, cuts,
       reportPath: join(directory, `cut-review-${randomUUID()}.json`),
@@ -244,6 +255,7 @@ export async function reviewCuts(project, {projectDir, outputDir, contextSeconds
       limitations: ['Transcript timing may be missing or inaccurate. Boundary checks do not establish whether a spoken word sounds clipped.',
       'Audio measurements describe the mixed master, so music or effects can mask speech. Level changes are not proof of clicks.',
         'Quiet-gap thresholds and short windows are review aids. They do not establish natural speech flow or final mix quality.',
+        ...(snapshot.custom?.mode === 'layer' ? ['Main-clip joins use the engine timeline. Independent cuts inside custom layers are not discovered, and custom visuals may cover the main video.'] : []),
         ...(!renderPreviews ? ['Moving previews and mixed-audio measurements were skipped.'] : [])]};
     await saveReport(report, directory, signal);
     onProgress({stage: 'review_cuts', progress: 1, message: 'Cut review report saved'});

@@ -1,4 +1,4 @@
-import React, {useMemo} from 'react';
+import React, {createContext, useContext, useMemo} from 'react';
 import {
   AbsoluteFill, Audio, Composition, Img, OffthreadVideo, Sequence,
   useCurrentFrame,
@@ -10,7 +10,8 @@ type Timeline = {
   assets: Asset[]; clips: any[]; overlays: any[]; captions: any[];
   settings?: Record<string, any>; captionsStyle?: Record<string, any>;
 };
-export type EngineProps = {timeline: Timeline};
+export type EngineProps = {timeline: Timeline; customLayerProps?: Record<string, unknown>};
+const CustomLayerContext = createContext<React.ComponentType<any> | null>(null);
 
 const mediaStyle = {width: '100%', height: '100%'} as const;
 const getAsset = (timeline: Timeline, id: string): Asset => {
@@ -106,16 +107,22 @@ function CaptionPages({timeline}: {timeline: Timeline}) {
   </div>;
 }
 
-export function TimelineComposition({timeline}: EngineProps) {
+export function TimelineComposition({timeline, customLayerProps}: EngineProps) {
+  const CustomLayer = useContext(CustomLayerContext);
   return <AbsoluteFill style={{backgroundColor: timeline.settings?.background ?? '#000000'}}>
-    {timeline.clips.map((clip) => <Sequence key={clip.id} from={clip.from} durationInFrames={clip.durationInFrames}>
-      <Clip clip={clip} timeline={timeline}/>
-    </Sequence>)}
-    {timeline.overlays.map((overlay) => <Sequence key={overlay.id} from={overlay.from}
-      durationInFrames={overlay.durationInFrames} layout={overlay.type === 'audio' ? 'none' : 'absolute-fill'}>
-      <Overlay overlay={overlay} timeline={timeline}/>
-    </Sequence>)}
-    <CaptionPages timeline={timeline}/>
+    <AbsoluteFill style={{zIndex: 0, isolation: 'isolate'}}>
+      {timeline.clips.map((clip) => <Sequence key={clip.id} from={clip.from} durationInFrames={clip.durationInFrames}>
+        <Clip clip={clip} timeline={timeline}/>
+      </Sequence>)}
+      {timeline.overlays.map((overlay) => <Sequence key={overlay.id} from={overlay.from}
+        durationInFrames={overlay.durationInFrames} layout={overlay.type === 'audio' ? 'none' : 'absolute-fill'}>
+        <Overlay overlay={overlay} timeline={timeline}/>
+      </Sequence>)}
+    </AbsoluteFill>
+    {CustomLayer ? <AbsoluteFill style={{zIndex: 1, isolation: 'isolate'}}>
+      <CustomLayer {...customLayerProps} timeline={timeline}/>
+    </AbsoluteFill> : null}
+    <AbsoluteFill style={{zIndex: 2, isolation: 'isolate'}}><CaptionPages timeline={timeline}/></AbsoluteFill>
   </AbsoluteFill>;
 }
 
@@ -124,7 +131,15 @@ const empty: Timeline = {fps: 30, width: 1080, height: 1920, durationInFrames: 1
 
 export function EngineRoot() {
   return <Composition id="AgentVideo" component={TimelineComposition} width={1080} height={1920}
-    fps={30} durationInFrames={1} defaultProps={{timeline: empty}}
+    fps={30} durationInFrames={1} defaultProps={{timeline: empty, customLayerProps: {}}}
     calculateMetadata={({props}) => ({fps: props.timeline.fps, width: props.timeline.width,
       height: props.timeline.height, durationInFrames: props.timeline.durationInFrames})}/>;
+}
+
+// Called exactly once by the generated bundle entry, before React renders.
+// Components stay stable across frames; no component is created during render.
+export function createEngineRoot(CustomLayer: React.ComponentType<any>) {
+  return function EngineRootWithLayer() {
+    return <CustomLayerContext.Provider value={CustomLayer}><EngineRoot/></CustomLayerContext.Provider>;
+  };
 }

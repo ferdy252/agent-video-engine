@@ -218,7 +218,9 @@ export async function renderProject(project, options = {}) {
   validateProject(project);
   await assertAssets(project);
   const timeline = compileTimeline(project);
-  if (!timeline.custom && timeline.durationInFrames < 1) throw new Error('Add at least one clip before rendering');
+  if ((!timeline.custom || timeline.custom.mode === 'layer') && timeline.durationInFrames < 1) {
+    throw new Error('Add at least one clip or overlay before rendering');
+  }
   const server = await startAssetServer(timeline.assets, {publicDir: timeline.custom?.publicDir});
   let work, browser;
   const {cancelSignal, cancel} = makeCancelSignal();
@@ -230,18 +232,26 @@ export async function renderProject(project, options = {}) {
     work = await mkdtemp(join(dirname(output), '.agent-video-render-'));
     const partial = join(work, `render${extension}`);
     const custom = timeline.custom;
+    const customMode = custom?.mode ?? 'composition';
+    let customLayer;
     let entryPoint = join(engineRoot, 'src/remotion-entry.ts');
     if (custom) {
       if (!isAbsolute(custom.entryPoint)) throw new Error('Custom entryPoint must be an absolute local path');
-      entryPoint = await realpath(custom.entryPoint);
-      if (!(await stat(entryPoint)).isFile()) throw new Error('Custom entryPoint is not a regular file');
-      if (typeof custom.compositionId !== 'string' || !custom.compositionId) throw new Error('Custom compositionId is required');
+      const customEntryPoint = await realpath(custom.entryPoint);
+      if (!(await stat(customEntryPoint)).isFile()) throw new Error('Custom entryPoint is not a regular file');
+      if (customMode === 'layer') customLayer = {entryPoint: customEntryPoint, exportName: custom.exportName ?? 'default'};
+      else {
+        entryPoint = customEntryPoint;
+        if (typeof custom.compositionId !== 'string' || !custom.compositionId) throw new Error('Custom compositionId is required');
+      }
     }
     const browserExecutable = await findBrowserExecutable();
-    const inputProps = {...(custom?.props ?? {}), timeline: {...timeline, assets: server.assets}};
-    const compositionId = custom?.compositionId ?? 'AgentVideo';
+    const inputProps = customMode === 'layer'
+      ? {timeline: {...timeline, assets: server.assets}, customLayerProps: custom?.props ?? {}}
+      : {...(custom?.props ?? {}), timeline: {...timeline, assets: server.assets}};
+    const compositionId = custom && customMode !== 'layer' ? custom.compositionId : 'AgentVideo';
     report(onProgress, {stage: 'bundle', progress: 0});
-    const serveUrl = await bundle({entryPoint, outDir: join(work, 'bundle'),
+    const serveUrl = await bundle({entryPoint, outDir: join(work, 'bundle'), customLayer,
       staticBase: server.staticBase, staticFiles: server.staticFiles,
       onProgress: (progress) => report(onProgress, {stage: 'bundle', progress: progress / 100})});
     checkAbort(signal);
@@ -251,6 +261,9 @@ export async function renderProject(project, options = {}) {
     const composition = await selectComposition({serveUrl, id: compositionId, inputProps,
       puppeteerInstance: browser, browserExecutable, chromeMode: 'chrome-for-testing', logLevel: 'error'});
     checkAbort(signal);
+    if (customMode === 'layer' && ['fps', 'width', 'height', 'durationInFrames'].some((key) => composition[key] !== timeline[key])) {
+      throw new Error('Custom layer changed the engine composition clock. Layers must use the supplied timeline.');
+    }
     const dimensions = outputDimensions(composition, scale, kind === 'still');
     const common = {serveUrl, composition, inputProps, puppeteerInstance: browser,
       browserExecutable, chromeMode: 'chrome-for-testing', cancelSignal, scale, overwrite: false, logLevel: 'error'};
@@ -286,7 +299,7 @@ export async function renderProject(project, options = {}) {
     await link(partial, output);
     report(onProgress, {stage: 'complete', progress: 1});
     return {outputPath: output, kind, revision: project.revision, bytes: info.size,
-      compositionId, durationInFrames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1,
+      compositionId, ...(custom ? {customMode} : {}), durationInFrames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1,
       fps: composition.fps, ...dimensions, verification,
       ...(frame === undefined ? {frameRange} : {frame})};
   } catch (error) {

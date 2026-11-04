@@ -127,7 +127,7 @@ Detached workers preserve jobs after a client disconnects. A local loopback sock
 
 ## Review speech cuts
 
-`review_cuts` reviews discontinuous joins in the built-in timeline without changing its project or revision. Contiguous splits of the same source with unchanged playback and layout are omitted. It returns a durable job ID; use `job_get` to read the completed report and preview paths.
+`review_cuts` reviews discontinuous joins in the engine timeline, including custom layer mode, without changing its project or revision. Contiguous splits of the same source with unchanged playback and layout are omitted. It returns a durable job ID; use `job_get` to read the completed report and preview paths.
 
 ```json
 {
@@ -148,7 +148,7 @@ The default audio checks compare 150 ms RMS windows and flag level changes of at
 
 Use `renderPreviews: false` for transcript timing review without rendering or audio analysis. Missing transcripts, absent audio and measurements limited by preview context are reported explicitly. Review files stay under the project's ignored `.engine/reviews/` directory. Cancellation preserves the original edit and removes incomplete review output.
 
-Custom compositions can ignore or change the engine's timeline, so they are rejected with `UNSUPPORTED_CUSTOM_REVIEW` rather than given misleading join timestamps. Review their rendered output directly, or use the built-in timeline.
+Custom motion registered with `mode: "layer"` shares the engine clock and is supported by cut review. Independent standalone compositions can use different cuts, so those still return `UNSUPPORTED_CUSTOM_REVIEW` until adapted. Review covers engine-owned main clips and the final mixed audio. It does not discover edits made inside custom layer content or prove the main footage remains visible beneath graphics.
 
 ## Edit operations
 
@@ -219,9 +219,48 @@ Overlay endpoints extend the composition when needed. Overlay-only titles, graph
 
 Local transcription retains raw output and normalized words under `.engine/transcripts/`. Temporary extracted audio is removed. Small decoder overshoots can be bounded to the actual media duration and marked for timing review, with raw timings retained.
 
-## Custom Remotion compositions
+## Custom motion on the shared timeline
 
-Use custom React/Remotion code for original motion, demonstrations or more specialized visual behavior. The entry point must call `registerRoot()`:
+Use `mode: "layer"` for custom animation that follows the same footage cuts, captions and output clock. The engine renders the main clips and ordinary overlays, adds the custom layer, then draws captions above it. The engine determines composition dimensions, frame rate and duration from its saved timeline. A layer cannot supply a separate composition ID or clock.
+
+Register a local React component module. It must export the layer and must not call `registerRoot()`:
+
+```json
+{
+  "type": "set_custom",
+  "custom": {
+    "mode": "layer",
+    "entryPoint": "/absolute/path/custom-motion.tsx",
+    "publicDir": "/absolute/path/composition/public",
+    "props": {"color": "#ffde59"}
+  }
+}
+```
+
+Example `custom-motion.tsx`:
+
+```tsx
+import {useCurrentFrame} from 'remotion';
+
+export default function Motion({timeline, color}) {
+  const frame = useCurrentFrame();
+  const cue = timeline.captions.find(word => word.id === 'w42');
+  if (!cue || frame < cue.startFrame || frame >= cue.endFrame) return null;
+  return <div style={{position: 'absolute', top: 40, left: 40, color}}>
+    Word-linked motion
+  </div>;
+}
+```
+
+The default export is selected unless `exportName` names another component. Components receive `{...custom.props, timeline}` with the compiled engine timeline taking precedence. Use its clip frames, caption word IDs and word-anchored overlay times to keep animation aligned after edits. React memo and forwardRef components are supported.
+
+`review_cuts` uses exactly the same layer-enabled rendering path as previews and final exports. Reports identify their scope as `engine_main_timeline`. Audio level changes can be measured in the final mix even when the layer supplies audio. Silence is not classified when the engine cannot establish expected audio on both sides from its clips and registered overlays.
+
+To adapt an older custom composition, extract its motion into a component, move primary footage cuts into engine clips, and register that component in layer mode. Remove its `registerRoot()` and independent `<Composition>` setup from the layer module. Existing project files are not converted automatically.
+
+## Independent standalone compositions
+
+Standalone mode remains available for existing Remotion projects that own their complete composition and timing. Omit `mode` or use `mode: "composition"`. Its entry point must call `registerRoot()`:
 
 ```json
 {
@@ -235,7 +274,7 @@ Use custom React/Remotion code for original motion, demonstrations or more speci
 }
 ```
 
-Custom compositions receive `{...custom.props, timeline}`. The timeline contains compiled clips, captions, overlays and registered asset `src` URLs. Consume that timeline when engine edits should affect the composition. Existing code with hardcoded timing retains its behavior until adapted.
+Standalone compositions receive `{...custom.props, timeline}`. The timeline contains compiled clips, captions, overlays and registered asset `src` URLs. Consume that timeline when engine edits should affect the composition. Existing code with hardcoded timing retains its behavior until adapted.
 
 `custom.publicDir` is optional and must identify an absolute local directory. `staticFile()` and `getStaticFiles()` use token-protected loopback routes for inventoried files, including symlinked files and directories, without copying those media files. Unregistered local paths are not served. Custom composition code is trusted executable project code.
 

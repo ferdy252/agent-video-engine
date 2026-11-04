@@ -22,6 +22,12 @@ const overlaySchema = z.object({id: z.string(), type: z.enum(['text', 'image', '
   assetId: z.string().optional(), start: z.number().nonnegative(), end: z.number().positive(), sourceStart: z.number().nonnegative().optional(),
   volume: z.number().min(0).max(8).optional(), style: z.record(z.unknown()).optional(),
   anchor: z.object({assetId: z.string(), wordId: z.string(), offset: z.number().optional(), clipId: z.string().optional()}).strict().optional()}).strict();
+const customSchema = z.union([
+  z.object({mode: z.literal('layer'), entryPoint: z.string(), exportName: z.string().optional(), publicDir: z.string().optional(),
+    props: z.record(z.unknown()).optional()}).strict(),
+  z.object({mode: z.literal('composition').optional(), entryPoint: z.string(), compositionId: z.string(), publicDir: z.string().optional(),
+    props: z.record(z.unknown()).optional()}).strict(),
+]);
 const operationSchema = z.discriminatedUnion('type', [
   z.object({type: z.literal('set_clips'), clips: z.array(clipSchema)}).strict(),
   z.object({type: z.literal('split_clip'), clipId: z.string(), sourceTime: z.number().nonnegative(), newClipId: z.string().optional()}).strict(),
@@ -35,8 +41,7 @@ const operationSchema = z.discriminatedUnion('type', [
   z.object({type: z.literal('set_captions'), patch: captionPatch}).strict(),
   z.object({type: z.literal('set_settings'), patch: z.object({width: z.number().int().min(2).max(16384).optional(), height: z.number().int().min(2).max(16384).optional(),
     fps: z.number().int().min(1).max(120).optional(), background: z.string().optional()}).strict()}).strict(),
-  z.object({type: z.literal('set_custom'), custom: z.object({entryPoint: z.string(), compositionId: z.string(), publicDir: z.string().optional(),
-    props: z.record(z.unknown()).optional()}).strict().nullable()}).strict(),
+  z.object({type: z.literal('set_custom'), custom: customSchema.nullable()}).strict(),
 ]);
 async function inspect({projectDir: dir, includeTimeline = false}) {
   const project = await loadProject(dir);
@@ -116,14 +121,14 @@ export const toolDefinitions = [
   {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Always creates a new output and preserves originals and accepted exports.',
     schema: {projectDir, expectedRevision, outputPath: z.string().optional(), concurrency: z.number().int().min(1).max(8).optional()}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
-  {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Custom compositions require their own review because their timing may differ from the engine timeline.',
+  {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Supports the built-in timeline and custom layer mode, where the engine owns timing and main clips. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Independent standalone compositions require adaptation to layer mode.',
     schema: {projectDir, expectedRevision, contextSeconds: z.number().min(0.25).max(3).default(1),
       offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20),
       renderPreviews: z.boolean().default(true).describe('When false, perform transcript timing review only; audio is explicitly skipped.')}, annotations: edit,
     run: async args => {
       const project = await loadProject(args.projectDir);
       if (project.revision !== args.expectedRevision) throw Object.assign(new Error('Project revision changed. Inspect it before reviewing.'), {code: 'STALE_REVISION'});
-      if (project.custom) throw Object.assign(new Error('Custom compositions can use their own timing. Review their rendered output directly, or switch to the engine timeline before using review_cuts.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
+      if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition owns its timing. Adapt its motion component to custom.mode="layer" so the engine renders the shared main timeline, or review its output directly.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
       return startJob(args.projectDir, {...args, type: 'review_cuts'});
     }},
   {name: 'job_list', description: 'List saved local render and transcription jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},

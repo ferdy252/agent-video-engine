@@ -7,6 +7,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {createProject} from '../src/project.mjs';
 import {renderProject, startAssetServer} from '../src/render.mjs';
+import {bundle} from '../src/bundle.mjs';
 
 const exec = promisify(execFile);
 async function scratch(t) {
@@ -81,6 +82,15 @@ test('existing outputs and original source assets cannot be replaced', async (t)
   assert.ok(!(await readdir(directory)).some((name) => name.startsWith('.agent-video-render-')));
 });
 
+test('custom layers must declare the same pinned Remotion runtime as the engine', async (t) => {
+  const directory = await scratch(t);
+  const entryPoint = path.join(directory, 'layer.tsx');
+  await writeFile(entryPoint, 'export default function Layer() { return null; }');
+  await writeFile(path.join(directory, 'package.json'), JSON.stringify({dependencies: {remotion: '4.0.538'}}));
+  await assert.rejects(bundle({entryPoint: path.resolve(import.meta.dirname, '../src/remotion-entry.ts'),
+    outDir: path.join(directory, 'bundle'), customLayer: {entryPoint}}), /Migrate explicitly/);
+});
+
 test('headless synthetic smoke renders source trim, caption, overlay and audio',
   {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1', timeout: 120000}, async (t) => {
     const directory = await scratch(t);
@@ -143,6 +153,7 @@ registerRoot(() => <Composition id="CustomMotion" component={Motion} width={160}
       custom: {entryPoint, compositionId: 'CustomMotion', publicDir, props: {color: '#ff00ff'}}});
     const still = await renderProject(project, {kind: 'still', frame: 8, outputPath: path.join(directory, 'custom.png')});
     assert.equal(still.compositionId, 'CustomMotion');
+    assert.equal(still.customMode, 'composition');
     assert.equal(still.verification.probe, 'passed');
     const pixel = await exec('ffmpeg', ['-v', 'error', '-i', still.outputPath,
       '-vf', 'crop=1:1:80:60,format=rgb24', '-frames:v', '1', '-f', 'rawvideo', '-'], {encoding: 'buffer'});
@@ -155,4 +166,91 @@ registerRoot(() => <Composition id="CustomMotion" component={Motion} width={160}
     const files = await readdir(directory);
     assert.ok(!files.includes('cancelled.mp4'));
     assert.ok(!files.some((name) => name.startsWith('.agent-video-render-')));
+  });
+
+test('shared-timing custom layers preserve base edits, anchored overlays, captions and the engine clock',
+  {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1', timeout: 120000}, async (t) => {
+    const directory = await scratch(t);
+    const source = path.join(directory, 'source.mp4');
+    await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n',
+      '-f', 'lavfi', '-i', 'color=red:s=160x90:r=20:d=1',
+      '-f', 'lavfi', '-i', 'color=blue:s=160x90:r=20:d=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2',
+      '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]', '-map', '[v]', '-map', '2:a',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', source]);
+    const original = await readFile(source);
+    const publicDir = path.join(directory, 'public');
+    await mkdir(publicDir);
+    const artwork = path.join(directory, 'cyan.svg');
+    await writeFile(artwork, '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="cyan"/></svg>');
+    await symlink(artwork, path.join(publicDir, 'cyan.svg'));
+    const entryPoint = path.join(directory, 'layer.tsx');
+    await writeFile(entryPoint, `import React, {memo, forwardRef} from 'react';
+import {Img, Sequence, staticFile, useVideoConfig, useCurrentFrame} from 'remotion';
+// Mentioning registerRoot() in a comment must not reject a valid component module.
+function Layer({timeline, accent}) {
+  const config = useVideoConfig();
+  const frame = useCurrentFrame();
+  if (timeline.width !== 160 || config.fps !== timeline.fps || config.durationInFrames !== timeline.durationInFrames) throw new Error('Engine clock was replaced');
+  const cue = timeline.overlays.find(overlay => overlay.id === 'word-cue');
+  return <>
+    <Img src={staticFile('cyan.svg')} style={{position:'absolute',right:0,top:0,width:20,height:20}}/>
+    <Sequence from={cue.from} durationInFrames={cue.durationInFrames}>
+      <div style={{position:'absolute',left:0,top:0,width:20,height:20,backgroundColor:accent,transform:'translateX('+Math.min(frame,1)+'px)'}}/>
+    </Sequence>
+    <div style={{position:'absolute',left:0,bottom:0,width:160,height:30,backgroundColor:'#00ff00',zIndex:2147483647}}/>
+  </>;
+}
+export default memo(Layer);
+export const NamedLayer = forwardRef(function NamedLayer(props, ref) { return <Layer {...props}/>; });
+`);
+    const projectDir = path.join(directory, 'project');
+    const project = await createProject(projectDir, {name: 'Shared timing layer',
+      settings: {width: 160, height: 90, fps: 20},
+      captions: {fontSize: 12, bottom: 2, wordsPerPage: 1},
+      assets: [{id: 'source', path: source, type: 'video', duration: 2, fps: 20, hasAudio: true}],
+      clips: [{id: 'red', assetId: 'source', sourceStart: 0.1, sourceEnd: 0.6},
+        {id: 'blue', assetId: 'source', sourceStart: 1, sourceEnd: 1.5}],
+      transcripts: [{assetId: 'source', language: 'en', words: [{id: 'go', text: 'GO', start: 1.1, end: 1.4}]}],
+      overlays: [{id: 'word-cue', type: 'text', text: 'X', start: 0, end: .2,
+        anchor: {assetId: 'source', wordId: 'go'},
+        style: {left: 0, top: 0, width: 20, height: 20, backgroundColor: '#00ff00', zIndex: 999999}}],
+      custom: {mode: 'layer', entryPoint, publicDir, props: {accent: '#ff00ff', timeline: {width: 1}}}});
+    const before = await readFile(path.join(projectDir, 'project.json'), 'utf8');
+    const rendered = await renderProject(project, {kind: 'video', outputPath: path.join(directory, 'layer.mp4')});
+    assert.equal(rendered.customMode, 'layer');
+    assert.equal(rendered.compositionId, 'AgentVideo');
+    assert.equal(rendered.durationInFrames, 20);
+    assert.equal(rendered.fps, 20);
+    assert.equal(rendered.width, 160);
+    assert.equal(rendered.height, 90);
+    const sample = async (time, x, y, width = 1, height = 1) => {
+      const {stdout} = await exec('ffmpeg', ['-v', 'error', '-ss', String(time), '-i', rendered.outputPath,
+        '-vf', `crop=${width}:${height}:${x}:${y},format=rgb24`, '-frames:v', '1', '-f', 'rawvideo', '-'], {encoding: 'buffer'});
+      return stdout;
+    };
+    const red = await sample(.2, 50, 30), blue = await sample(.7, 50, 30);
+    assert.ok(red[0] > 200 && red[2] < 40, 'Engine base renders the first retained clip');
+    assert.ok(blue[2] > 200 && blue[0] < 40, 'Engine base renders the second retained clip');
+    const marker = await sample(.7, 5, 5);
+    assert.ok(marker[0] > 200 && marker[1] < 50 && marker[2] > 200, 'Word-anchored custom graphic is above ordinary overlays');
+    const cyan = await sample(.2, 150, 5);
+    assert.ok(cyan[0] < 40 && cyan[1] > 200 && cyan[2] > 200, 'Layer can use a registered staticFile asset');
+    const caption = await sample(.7, 50, 60, 60, 30);
+    let yellow = 0;
+    for (let index = 0; index < caption.length; index += 3) {
+      if (caption[index] > 150 && caption[index + 1] > 130 && caption[index + 2] < 100) yellow++;
+    }
+    assert.ok(yellow > 5, 'Engine captions remain above even a high-z-index custom graphic');
+    const named = await renderProject({...project, custom: {...project.custom, exportName: 'NamedLayer'}},
+      {kind: 'still', frame: 14, outputPath: path.join(directory, 'named.png')});
+    assert.equal(named.compositionId, 'AgentVideo');
+    assert.equal(named.verification.probe, 'passed');
+    const invalidEntry = path.join(directory, 'invalid-layer.tsx');
+    await writeFile(invalidEntry, 'export default {};');
+    await assert.rejects(renderProject({...project, custom: {...project.custom, entryPoint: invalidEntry}},
+      {kind: 'still', outputPath: path.join(directory, 'invalid.png')}), /must be a React component/);
+    assert.ok(!(await readdir(directory)).includes('invalid.png'));
+    assert.equal(await readFile(path.join(projectDir, 'project.json'), 'utf8'), before);
+    assert.deepEqual(await readFile(source), original);
   });

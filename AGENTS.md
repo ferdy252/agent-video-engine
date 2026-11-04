@@ -7,6 +7,7 @@ Read `README.md` for the public API, timing model and runtime requirements. This
 - Keep one saved manifest, one source-linked edit model and one compiled output frame clock.
 - Keep source media immutable. Reference it by asset ID and verify fingerprints before and after rendering.
 - Use structured operations for ordinary edits. Custom compositions consume the compiled timeline when their output should follow engine edits.
+- Prefer `custom.mode: "layer"` for new custom motion. It keeps the engine in control of the main clips and clock and supports cut review. Standalone composition mode preserves independent timing and requires adaptation before automatic join review.
 - Preserve atomic revision checks, complete batch validation, revision history, cancellation and exports that refuse to overwrite files.
 - Treat a returned job ID as queued work. Inspect the terminal job result before reporting success.
 - Preserve native transcript timing and raw evidence. Never infer a missing speech duration merely to permit a cut.

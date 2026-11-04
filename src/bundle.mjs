@@ -27,18 +27,33 @@ async function checkProjectVersion(entryPoint) {
 }
 
 /** A render-only bundle, with no dependency on Studio, CLI, Webpack or Rspack. */
-export async function bundle({entryPoint, outDir, onProgress, staticBase, staticFiles = []}) {
+export async function bundle({entryPoint, outDir, onProgress, staticBase, staticFiles = [], customLayer}) {
   if (VERSION !== supportedVersion || require('@remotion/renderer/package.json').version !== supportedVersion) {
     throw new Error(`The headless bridge requires Remotion and renderer ${supportedVersion}. Update and verify the bridge before upgrading.`);
   }
   await checkProjectVersion(entryPoint);
+  if (customLayer) await checkProjectVersion(customLayer.entryPoint);
   await mkdir(outDir, {recursive: true});
   onProgress?.(0);
   const aliases = Object.fromEntries(['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client']
     .map((name) => [name, require.resolve(name)]));
   for (const name of ['remotion', 'remotion/no-react', 'remotion/version']) aliases[name] = fileURLToPath(import.meta.resolve(name));
+  const contents = customLayer ? `import * as React from 'react';
+import {Internals, registerRoot} from 'remotion';
+import * as LayerModule from ${JSON.stringify(customLayer.entryPoint)};
+import {createEngineRoot} from ${JSON.stringify(join(engineRoot, 'src/composition.tsx'))};
+import ${JSON.stringify(join(engineRoot, 'src/render-bridge.tsx'))};
+globalThis.React = React;
+if (Internals.getRoot()) throw new Error("Layer modules must export a React component without calling registerRoot(). Use mode:'composition' for a standalone composition.");
+const CustomLayer = LayerModule[${JSON.stringify(customLayer.exportName ?? 'default')}];
+const componentType = CustomLayer && CustomLayer.$$typeof;
+if (typeof CustomLayer !== 'function' && componentType !== Symbol.for('react.memo') && componentType !== Symbol.for('react.forward_ref')) {
+  throw new Error(${JSON.stringify(`Custom layer export "${customLayer.exportName ?? 'default'}" must be a React component (function, memo or forwardRef).`)});
+}
+registerRoot(createEngineRoot(CustomLayer));`
+    : `import * as React from 'react';\nimport ${JSON.stringify(entryPoint)};\nimport ${JSON.stringify(join(engineRoot, 'src/render-bridge.tsx'))};\nglobalThis.React = React;`;
   const built = await build({
-    stdin: {contents: `import * as React from 'react';\nimport ${JSON.stringify(entryPoint)};\nimport ${JSON.stringify(join(engineRoot, 'src/render-bridge.tsx'))};\nglobalThis.React = React;`,
+    stdin: {contents,
       resolveDir: engineRoot, sourcefile: 'agent-video-entry.ts', loader: 'ts'},
     outfile: join(outDir, 'bundle.js'), bundle: true, platform: 'browser', format: 'iife',
     target: 'chrome120', jsx: 'automatic', minify: true, sourcemap: 'linked', metafile: true,

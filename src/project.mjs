@@ -166,7 +166,21 @@ export function validateProject(project) {
   if (project.custom !== undefined && project.custom !== null) {
     object(project.custom, 'custom');
     existingFile(project.custom.entryPoint, 'custom.entryPoint');
-    string(project.custom.compositionId, 'custom.compositionId');
+    const mode = project.custom.mode ?? 'composition';
+    if (!['composition', 'layer'].includes(mode)) fail('custom.mode must be composition or layer.');
+    if (mode === 'layer') {
+      if (project.custom.compositionId !== undefined) fail('Layer mode uses the engine composition and cannot specify compositionId.');
+      if (project.custom.exportName !== undefined) string(project.custom.exportName, 'custom.exportName');
+    } else {
+      string(project.custom.compositionId, 'custom.compositionId');
+      if (project.custom.exportName !== undefined) fail('custom.exportName is supported only in layer mode.');
+    }
+    if (project.custom.publicDir !== undefined) {
+      string(project.custom.publicDir, 'custom.publicDir');
+      if (!path.isAbsolute(project.custom.publicDir)) fail('custom.publicDir must be an absolute local directory.');
+      try { if (!statSync(project.custom.publicDir).isDirectory()) fail('custom.publicDir must identify a directory.'); }
+      catch (error) { if (error.code === 'VALIDATION_ERROR') throw error; fail('custom.publicDir is not an accessible directory.'); }
+    }
     if (project.custom.props !== undefined) {
       object(project.custom.props, 'custom.props');
       jsonData(project.custom.props, 'custom.props');
