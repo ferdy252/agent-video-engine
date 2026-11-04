@@ -1,0 +1,32 @@
+{
+  "name": "agent-video-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local headless video editing engine and MCP tools. No desktop shell or editor UI.",
+  "bin": {
+    "video-engine": "src/cli.mjs"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "doctor": "node src/cli.mjs doctor",
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@remotion/captions": "4.0.534",
+    "@remotion/fonts": "4.0.534",
+    "@remotion/media": "4.0.534",
+    "@remotion/renderer": "4.0.534",
+    "esbuild": "0.28.1",
+    "gsap": "3.14.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.534",
+    "zod": "3.25.76"
+  }
+}
