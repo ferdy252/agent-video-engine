@@ -7,7 +7,7 @@ import {compileTimeline} from './timeline.mjs';
 import {probeAsset, doctor, assertAssets} from './media.mjs';
 import {normalizeTranscript} from './transcribe.mjs';
 import {startJob, getJob, cancelJob, retryJob, listJobs} from './jobs.mjs';
-import {importCutScript} from './import-legacy.mjs';
+import {importLegacyProject} from './import-legacy.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
@@ -61,9 +61,9 @@ async function renderJob(args, sourcePreview = false) {
 }
 export const toolDefinitions = [
   {name: 'engine_status', description: 'Check local video engine dependencies and cached transcription model. No uploads or downloads.', schema: {}, annotations: ro, run: doctor},
-  {name: 'project_import_cutscript', description: 'Import an existing local CutScript .aive project into a new headless project, preserving its source transcript and explicit cuts. Does not change the source project or footage.',
+  {name: 'project_import_legacy', description: 'Import an existing local legacy .aive project into a new headless project, preserving its source transcript and explicit cuts. Does not change the source project or footage.',
     schema: {projectDir, path: z.string().min(1), name: z.string().optional()}, annotations: edit,
-    run: ({projectDir: dir, ...options}) => importCutScript(dir, options)},
+    run: ({projectDir: dir, ...options}) => importLegacyProject(dir, options)},
   {name: 'project_create', description: 'Create a new local headless video project. Existing directories and media are preserved.',
     schema: {projectDir, name: z.string().min(1), width: z.number().int().positive().optional(), height: z.number().int().positive().optional(), fps: z.number().int().min(1).max(120).optional()}, annotations: edit,
     run: ({projectDir: dir, name, ...settings}) => createProject(dir, {name, settings})},
@@ -91,7 +91,7 @@ export const toolDefinitions = [
   {name: 'revision_restore', description: 'Restore a saved revision as a new revision. Keeps history and original footage.',
     schema: {projectDir, expectedRevision, revision: z.number().int().nonnegative()}, annotations: edit,
     run: ({projectDir: dir, ...request}) => restoreRevision(dir, request)},
-  {name: 'transcript_import', description: 'Import source-timed transcript words from local JSON (CutScript, whisper.cpp, or word array). Reuses existing transcripts without retranscription.',
+  {name: 'transcript_import', description: 'Import source-timed transcript words from local JSON, including a word array or native speech-recognition output. Reuses existing transcripts without retranscription.',
     schema: {projectDir, expectedRevision, assetId: z.string(), path: z.string().min(1)}, annotations: edit,
     run: async ({projectDir: dir, expectedRevision: revision, assetId, path}) => {
       const transcript = normalizeTranscript(JSON.parse(await readFile(resolve(path), 'utf8')), assetId);

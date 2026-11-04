@@ -4,11 +4,11 @@ import {mkdtemp, writeFile, readFile, rm, access, realpath} from 'node:fs/promis
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {run, fileFingerprint} from '../src/media.mjs';
-import {importCutScript} from '../src/import-legacy.mjs';
+import {importLegacyProject} from '../src/import-legacy.mjs';
 import {compileTimeline, loadProject} from '../src/project.mjs';
 
 async function fixture(t, patch = {}) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'agent-video-cutscript-import-'));
+  const directory = await mkdtemp(path.join(tmpdir(), 'agent-video-legacy-import-'));
   t.after(() => rm(directory, {recursive: true, force: true}));
   const media = path.join(directory, 'original.wav');
   await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-f', 'lavfi', '-i',
@@ -22,7 +22,7 @@ async function fixture(t, patch = {}) {
   return {directory, media, sourceProject, projectDir: path.join(directory, 'new-project')};
 }
 
-test('CutScript import preserves source-linked cuts, transcript and untouched originals', async (t) => {
+test('Legacy project import preserves source-linked cuts, transcript and untouched originals', async (t) => {
   const {media, sourceProject, projectDir} = await fixture(t, {deletedRanges: [
     {id: 'one', start: 1, end: 2, wordIndices: []},
     {id: 'overlap', start: 1.5, end: 2.25, wordIndices: []},
@@ -31,7 +31,7 @@ test('CutScript import preserves source-linked cuts, transcript and untouched or
   ]});
   const fingerprint = await fileFingerprint(media);
   const originalProject = await readFile(sourceProject, 'utf8');
-  const imported = await importCutScript(projectDir, {path: sourceProject, name: 'Migrated edit', settings: {fps: 20}});
+  const imported = await importLegacyProject(projectDir, {path: sourceProject, name: 'Migrated edit', settings: {fps: 20}});
   assert.equal(imported.name, 'Migrated edit');
   assert.equal(imported.revision, 0);
   assert.equal(imported.assets[0].path, await realpath(media));
@@ -49,15 +49,15 @@ test('CutScript import preserves source-linked cuts, transcript and untouched or
 
 test('no-cut import retains source lead-in, gaps and trailing silence rather than only transcript words', async (t) => {
   const {sourceProject, projectDir} = await fixture(t);
-  const imported = await importCutScript(projectDir, {path: sourceProject});
+  const imported = await importLegacyProject(projectDir, {path: sourceProject});
   assert.equal(imported.name, 'Edit');
   assert.deepEqual(imported.clips.map((clip) => [clip.sourceStart, clip.sourceEnd]), [[0, 4]]);
   assert.equal(compileTimeline(imported).durationInFrames, 120);
 });
 
-test('an all-deleted CutScript project imports an empty edit without changing its transcript', async (t) => {
+test('an all-deleted Legacy project imports an empty edit without changing its transcript', async (t) => {
   const {sourceProject, projectDir} = await fixture(t, {deletedRanges: [{start: 0, end: 4, wordIndices: [0, 1]}]});
-  const imported = await importCutScript(projectDir, {path: sourceProject});
+  const imported = await importLegacyProject(projectDir, {path: sourceProject});
   assert.deepEqual(imported.clips, []);
   assert.equal(imported.transcripts[0].words.length, 2);
   assert.deepEqual(compileTimeline(imported).captions, []);
@@ -65,13 +65,13 @@ test('an all-deleted CutScript project imports an empty edit without changing it
 
 test('import refuses existing destinations and invalid legacy timings without partial projects', async (t) => {
   const {sourceProject, projectDir} = await fixture(t);
-  await importCutScript(projectDir, {path: sourceProject});
+  await importLegacyProject(projectDir, {path: sourceProject});
   const before = await readFile(path.join(projectDir, 'project.json'), 'utf8');
-  await assert.rejects(importCutScript(projectDir, {path: sourceProject}), {code: 'PROJECT_EXISTS'});
+  await assert.rejects(importLegacyProject(projectDir, {path: sourceProject}), {code: 'PROJECT_EXISTS'});
   assert.equal(await readFile(path.join(projectDir, 'project.json'), 'utf8'), before);
   const invalidDir = `${projectDir}-invalid`;
   await writeFile(sourceProject, JSON.stringify({version: 1, videoPath: './original.wav', words: [], deletedRanges: [{start: '1', end: 2}]}));
-  await assert.rejects(importCutScript(invalidDir, {path: sourceProject}), {code: 'INVALID_LEGACY_PROJECT'});
+  await assert.rejects(importLegacyProject(invalidDir, {path: sourceProject}), {code: 'INVALID_LEGACY_PROJECT'});
   await assert.rejects(access(path.join(invalidDir, 'project.json')), {code: 'ENOENT'});
-  await assert.rejects(importCutScript(invalidDir, {path: './something.json'}), {code: 'INVALID_LEGACY_PROJECT'});
+  await assert.rejects(importLegacyProject(invalidDir, {path: './something.json'}), {code: 'INVALID_LEGACY_PROJECT'});
 });

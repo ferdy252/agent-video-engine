@@ -1,4 +1,4 @@
-/** Compile one source-linked edit into the common Remotion frame clock. */
+/** Compile one source-linked edit into the common output frame clock. */
 export function compileTimeline(project) {
   const {fps, width, height} = project.settings;
   const assets = new Map(project.assets.map((asset) => [asset.id, asset]));

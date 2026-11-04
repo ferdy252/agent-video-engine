@@ -1,6 +1,6 @@
 # agent-video-engine development
 
-Read `README.md` for the public API, timing model and runtime requirements. This repository is a standalone headless editor and MCP server. Development must not depend on a particular user's parent workspace, installed skills, private media or project history.
+Read `README.md` for the beginner overview and `docs/technical-reference.md` for the public API, timing model and runtime requirements. This repository is a standalone headless editor and MCP server. Development must not depend on a particular user's parent workspace, installed skills, private media or project history.
 
 ## Architecture
 

@@ -1,4 +1,10 @@
-# Remotion render bridge notice
+# Third-party notices
+
+## Legacy import support
+
+The original MIT copyright and permission notice is retained in [notices/legacy-import-MIT.txt](notices/legacy-import-MIT.txt).
+
+## Rendering runtime
 
 The render-only bridge in `src/render-bridge.tsx` is adapted from Remotion 4.0.534, copyright 2026 Remotion. It retains composition evaluation and rendering behavior. The editor interface, Studio loader and player controls are excluded.
 

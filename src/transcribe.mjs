@@ -6,7 +6,7 @@ import {run, fileFingerprint} from './media.mjs';
 
 export function normalizeTranscript(document, assetId, {duration, tolerance = 0.15} = {}) {
   const input = Array.isArray(document) ? document : document.words || document.transcription;
-  if (!Array.isArray(input)) throw new Error('Expected timestamped words, CutScript transcript, or whisper.cpp JSON');
+  if (!Array.isArray(input)) throw new Error('Expected timestamped words, source-timed transcript, or whisper.cpp JSON');
   const words = [];
   const timingReviewWordIds = [];
   for (const item of input) {

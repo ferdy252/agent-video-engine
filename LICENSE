@@ -4,8 +4,8 @@ No project-wide reuse license has been selected for the original code in this
 repository. Publishing this repository does not change third-party rights.
 
 The adapted render bridge in src/render-bridge.tsx remains governed by the
-Remotion 4.0.534 license reproduced in THIRD_PARTY_REMOTION_NOTICE.md. It is not
+Remotion 4.0.534 license reproduced in THIRD_PARTY_NOTICES.md. It is not
 relicensed under MIT, Apache, or another project-wide license.
 
-The CutScript MIT notice is retained in notices/CutScript-MIT.txt. Installed
+The legacy-import MIT notice is retained in notices/legacy-import-MIT.txt. Installed
 dependencies remain governed by their respective licenses.

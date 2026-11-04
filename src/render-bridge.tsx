@@ -1,6 +1,6 @@
 // Headless bridge for Remotion 4.0.534, adapted from the upstream Studio
 // renderEntry runtime. It contains no editor, player controls or Studio loader.
-// See THIRD_PARTY_REMOTION_NOTICE.md for origin and retained license terms.
+// See THIRD_PARTY_NOTICES.md for origin and retained license terms.
 import React, {useContext, useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {continueRender, delayRender, getInputProps, Internals, useDelayRender} from 'remotion';
@@ -90,7 +90,7 @@ async function calculate(id: string) {
   } finally {continueRender(handle);}
 }
 
-const loading = delayRender('Loading headless Remotion composition', {
+const loading = delayRender('Loading headless video composition', {
   timeoutInMilliseconds: browser.remotion_puppeteerTimeout ?? 10000,
 });
 Internals.waitForRoot(() => continueRender(loading));
@@ -98,7 +98,7 @@ browser.getStaticCompositions = () => Promise.all(compositions().map((compositio
 browser.remotion_getCompositionNames = () => compositions().map((composition) => composition.id);
 browser.remotion_calculateComposition = calculate;
 browser.remotion_setBundleMode = (mode: any) => {
-  const handle = delayRender('Mounting headless Remotion composition');
+  const handle = delayRender('Mounting headless video composition');
   Internals.waitForRoot((Root) => {
     mount(Root, mode);
     requestAnimationFrame(() => continueRender(handle));
