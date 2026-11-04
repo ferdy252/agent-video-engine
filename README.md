@@ -9,6 +9,7 @@ You describe the result you want. The agent makes editing decisions and uses thi
 ## What it can do
 
 - Cut, trim and rearrange footage, including cuts based on transcript words.
+- Map possible retakes inside one recording, with timestamps and picture previews.
 - Add captions, text, images, music and sound.
 - Create custom motion graphics that follow the edit.
 - Keep graphics attached to spoken words as the timing changes.
@@ -54,6 +55,12 @@ Keep your original footage in a local folder, connect your agent, and give it th
 > Use this recording to make a shorter edit. Preserve my wording, remove the retakes we identify, add readable captions and show me a preview before the final export.
 
 The agent can inspect the recording, build the edit and return previews. Tell it what to change, then review the final playback and sound before using the export.
+
+## All your takes in one recording
+
+Keep recording the way you normally do. The agent can use the transcript to find pauses, restarts and repeated passages inside the same file. A saved map links those possible attempts to timestamps and picture previews.
+
+The agent can search a line, preview the different versions and compare your delivery before choosing cuts. Repeated wording is a clue, not a verdict about the best take. The map leaves your recording and edit unchanged.
 
 For tool details, advanced graphics and troubleshooting, see the [technical reference](docs/technical-reference.md).
 

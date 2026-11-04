@@ -84,6 +84,26 @@ export const toolDefinitions = [
       const updated = await applyOperations(dir, {expectedRevision: revision, operations});
       return {asset, revision: updated.revision};
     }},
+  {name: 'media_index', description: 'Map one original recording, including multiple attempts recorded in the same file. Creates timestamped thumbnails/contact sheets for video, links existing source transcript words, and groups repeated passages as POSSIBLE retakes. Never chooses the best take, splits the source, changes the edit or deletes footage. Returns a durable job ID; read job_get for the index ID. Does not transcribe automatically: use transcribe or transcript_import first for spoken take grouping. Missing transcripts allow video picture maps without spoken grouping. Reuses a cached map when source, transcript and options match.',
+    schema: {projectDir, expectedRevision, assetId: z.string(), intervalSeconds: z.number().min(1).max(120).default(15),
+      maxThumbnails: z.number().int().min(6).max(240).default(120)}, annotations: edit,
+    run: async args => {
+      const project = await loadProject(args.projectDir);
+      if (project.revision !== args.expectedRevision) throw Object.assign(new Error('Project revision changed. Inspect it before indexing.'), {code: 'STALE_REVISION'});
+      const asset = project.assets.find(item => item.id === args.assetId);
+      if (!asset) throw Object.assign(new Error('Unknown source asset.'), {code: 'ASSET_NOT_FOUND'});
+      if (!['video', 'audio'].includes(asset.type)) throw Object.assign(new Error('Index a video or audio recording. Still images do not contain takes.'), {code: 'UNSUPPORTED_INDEX_ASSET'});
+      return startJob(args.projectDir, {...args, type: 'media_index'});
+    }},
+  {name: 'media_index_get', description: 'Read a saved original-recording map in bounded pages. Returns possible attempts, retake groups, source timestamps and preview hints; optionally returns one timestamped contact sheet as an image. Use the indexId returned by media_index. Normal timeline edits can reuse the map; changed source media or transcript requires reindexing. A possible retake is a repeated phrase, not a quality verdict.',
+    schema: {projectDir, indexId: z.string(), offset: z.number().int().nonnegative().default(0),
+      limit: z.number().int().min(1).max(50).default(20), sheetPage: z.number().int().nonnegative().default(0),
+      includePreview: z.boolean().default(true)}, annotations: ro,
+    run: async args => {const project = await loadProject(args.projectDir); const {readMediaIndex} = await import('./footage-index.mjs'); return readMediaIndex(project, args);}},
+  {name: 'media_search', description: 'Search words spoken in an indexed source recording and find source-time ranges plus possible alternative attempts. This is lexical transcript search, not semantic image search or automatic best-take selection. Use returned preview hints with source_preview to compare actual delivery before editing.',
+    schema: {projectDir, indexId: z.string(), query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
+      limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
+    run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
   {name: 'edit_apply', description: 'Apply an atomic batch of source-linked edits. Operations: set_clips, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words, upsert_overlay, remove_overlay, set_captions, set_settings, set_custom. Invalid batches make no change. Originals are never changed.',
     schema: {projectDir, expectedRevision, operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: async ({projectDir: dir, ...request}) => {const project = await applyOperations(dir, request); return {revision: project.revision, clips: project.clips, durationInFrames: compileTimeline(project).durationInFrames};}},
@@ -131,7 +151,7 @@ export const toolDefinitions = [
       if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition owns its timing. Adapt its motion component to custom.mode="layer" so the engine renders the shared main timeline, or review its output directly.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
       return startJob(args.projectDir, {...args, type: 'review_cuts'});
     }},
-  {name: 'job_list', description: 'List saved local render and transcription jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},
+  {name: 'job_list', description: 'List saved local render, transcription, cut-review and recording-index jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},
   {name: 'job_get', description: 'Read job progress, result paths or actionable errors. Completed still previews can be returned as images.',
     schema: {projectDir, jobId: z.string(), includePreview: z.boolean().optional()}, annotations: ro, run: ({projectDir: dir, jobId}) => getJob(dir, jobId)},
   {name: 'job_cancel', description: 'Request cancellation of a queued or running job and its underlying renderer/transcriber.', schema: {projectDir, jobId: z.string()}, annotations: edit, run: ({projectDir: dir, jobId}) => cancelJob(dir, jobId)},

@@ -90,6 +90,7 @@ The response includes the asset ID and new revision. Use those returned values i
 
 1. Inspect the project and current revision.
 2. Add media and import a timestamped transcript, or start local transcription.
+   For multiple takes inside one recording, build `media_index` and inspect its source ranges before selecting cuts.
 3. Read transcript words and inspect source previews before choosing cuts.
 4. Apply edits using the current `expectedRevision`.
 5. Run `review_cuts`, inspect the report and short join previews, then revise.
@@ -109,6 +110,9 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `project_validate` | `projectDir`; validate timing and original-media fingerprints |
 | `project_import_legacy` | `projectDir`, `path` to a version-1 `.aive`, optional `name` |
 | `media_add` | `projectDir`, `expectedRevision`, local `path`, optional `addToTimeline` |
+| `media_index` | `projectDir`, `expectedRevision`, `assetId`; optional `intervalSeconds`, `maxThumbnails` |
+| `media_index_get` | `projectDir`, `indexId`; optional `offset`, `limit`, `sheetPage`, `includePreview` |
+| `media_search` | `projectDir`, `indexId`, spoken-word `query`; optional `offset`, `limit` |
 | `transcript_import` | `projectDir`, `expectedRevision`, `assetId`, local JSON `path` |
 | `transcript_search` | `projectDir`, `assetId`, optional `query`, `offset`, `limit` |
 | `transcribe` | `projectDir`, `expectedRevision`, `assetId`, optional `modelPath`, `language` |
@@ -126,6 +130,30 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 Preview `kind` is `still` or `preview`. Frame ranges use output frames; source preview bounds use source seconds. Transcription and rendering return durable job IDs. Follow `job_get` until completion, failure or cancellation. Completed stills can be returned as MCP images using `includePreview`.
 
 Detached workers preserve jobs after a client disconnects. A local loopback socket serializes workers to limit concurrent resource use. Job metadata is saved under the project's `.engine/jobs/`; shared worker state defaults to the engine's `.cache/`, configurable with `VIDEO_ENGINE_RUNTIME`. Failed or interrupted jobs can be retried when their original project revision remains current.
+
+## Map takes inside one source recording
+
+`media_index` works on the original source asset, including a single uninterrupted recording that contains every attempt. It does not require separate files or changes of camera angle. It leaves the saved edit, source file and revision history unchanged.
+
+```json
+{
+  "projectDir": "/absolute/path/video-project",
+  "expectedRevision": 3,
+  "assetId": "camera",
+  "intervalSeconds": 15,
+  "maxThumbnails": 120
+}
+```
+
+This is an asynchronous job. Read `job_get` for its `indexId`, counts and cache status. Then read `media_index_get` with that ID to inspect source passages, possible-retake groups and timestamped contact-sheet pages. Each entry links back to original asset IDs, word IDs and source seconds. Use its source-preview hints with `source_preview` and the current project revision to compare actual delivery.
+
+The text map uses an existing transcript. Run `transcribe` or `transcript_import` first when spoken take grouping is needed. Pauses, sentence endings and nearby repeated phrases can suggest separate passages or restarts. Candidate groups identify possible alternatives; they do not choose a better take, remove speech or certify that a restart occurred. Timing and transcript errors can affect the suggestions.
+
+Video maps sample across the recording and near attempted passages. They adapt sampling when needed to keep at most `maxThumbnails` images. The default is 120, configurable from 6 to 240; `intervalSeconds` supports 1 to 120 seconds. Samples are representative source previews, not a claim that every visual scene change has been detected. Contact sheets keep their source timestamp labels and are returned as bounded JPEG pages through MCP. Audio assets receive a text map without image previews.
+
+`media_index_get` and `media_search` support `offset` and `limit` (default 20, maximum 50). `sheetPage` selects a contact sheet independently of the text page. Set `includePreview: false` to read metadata without inline images. `media_search` searches words actually present in the transcript and returns source ranges plus possible alternatives; it does not perform semantic image search. Match `text` and `wordIds` identify matching source entries, while `contextText` provides surrounding speech separately.
+
+Indexes are private derived files under `.engine/indexes/`. Cache identity includes the source content fingerprint, transcript words and timings, asset/project identity, sampling options and algorithm version. Normal timeline edits can reuse the same map. Changed source media or transcript makes an old map stale; build a new index before using it. Missing transcripts are reported explicitly: video receives a visual-only map, while audio receives metadata only. Neither triggers a hidden model download or transcription call. Cancellation removes partial work. No original media is copied into the index.
 
 ## Review speech cuts
 

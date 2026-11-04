@@ -11,6 +11,8 @@ Read `README.md` for the beginner overview and `docs/technical-reference.md` for
 - Preserve atomic revision checks, complete batch validation, revision history, cancellation and exports that refuse to overwrite files.
 - Treat a returned job ID as queued work. Inspect the terminal job result before reporting success.
 - Preserve native transcript timing and raw evidence. Never infer a missing speech duration merely to permit a cut.
+- Source indexes describe original recordings independently of timeline edits. Keep their output bounded, invalidate them when source or transcript changes, and bump the index algorithm version when analysis or sampling semantics change.
+- Treat repeated passages as possible alternatives. Take grouping must never select a best delivery or change the edit automatically.
 
 ## Runtime boundaries
 
