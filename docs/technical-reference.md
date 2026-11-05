@@ -41,7 +41,7 @@ Configure an MCP client to launch the stdio server directly:
 
 Replace both paths with local installations. If needed, pass `AGENT_VIDEO_BROWSER` and `VIDEO_ENGINE_MODEL` through the client's environment configuration. The server reserves stdout for MCP protocol messages and starts on demand.
 
-MCP hosts receive typed tool schemas. `node src/cli.mjs tools` also lists tool names and descriptions.
+MCP hosts receive typed tool schemas. Reconnect the server after updating to discover the current tools. `node src/cli.mjs tools` also lists tool names and descriptions.
 
 ## Command line usage
 
@@ -92,9 +92,9 @@ The response includes the asset ID and new revision. Use those returned values i
 2. Add media and import a timestamped transcript, or start local transcription.
    For multiple takes inside one recording, build `media_index` and inspect its source ranges before selecting cuts.
 3. Read transcript words and inspect source previews before choosing cuts.
-4. Apply edits using the current `expectedRevision`.
-5. Run `review_cuts`, inspect the report and short join previews, then revise.
-6. Validate the project and render a new final export.
+4. Stage a draft with `draft_stage` and preview it using `preview_render` with `draftId`. Use `edit_apply` when you want to save changes immediately.
+5. Apply the reviewed draft and use `review_cuts` to inspect joins in the saved edit.
+6. Validate the project and deliver the requested video, subtitles or editable timeline.
 
 Every successful edit batch creates a revision. Invalid batches and stale revisions leave the project unchanged. Restoring an earlier revision creates a new revision and preserves the intervening history.
 
@@ -105,11 +105,14 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | Tool | Main inputs and purpose |
 | --- | --- |
 | `engine_status` | Check local binaries, Node and the cached transcription model |
-| `project_create` | `projectDir`, `name`, optional `width`, `height`, `fps` |
+| `project_create` | `projectDir`, `name`, optional `width`, `height`, `fps`, `audio` |
 | `project_inspect` | `projectDir`, optional `includeTimeline` |
 | `project_validate` | `projectDir`; validate timing and original-media fingerprints |
 | `project_import_legacy` | `projectDir`, `path` to a version-1 `.aive`, optional `name` |
+| `project_bundle` | `projectDir`, `expectedRevision`, new `bundleDir`; package editable media and project as a job |
+| `project_open_bundle` | `bundleDir`, new `projectDir`; verify and open a portable copy as a job |
 | `media_add` | `projectDir`, `expectedRevision`, local `path`, optional `addToTimeline` |
+| `media_relink` | `projectDir`, `expectedRevision`, `replacements` with `{assetId, path}` entries |
 | `media_index` | `projectDir`, `expectedRevision`, `assetId`; optional `intervalSeconds`, `maxThumbnails` |
 | `media_index_get` | `projectDir`, `indexId`; optional `offset`, `limit`, `sheetPage`, `includePreview` |
 | `media_search` | `projectDir`, `indexId`, spoken-word `query`; optional `offset`, `limit` |
@@ -117,20 +120,47 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `transcript_search` | `projectDir`, `assetId`, optional `query`, `offset`, `limit` |
 | `transcribe` | `projectDir`, `expectedRevision`, `assetId`, optional `modelPath`, `language` |
 | `edit_apply` | `projectDir`, `expectedRevision`, `operations` |
+| `draft_stage` | `projectDir`, `expectedRevision`, `operations`, optional `name` |
+| `draft_inspect` | `projectDir`, `draftId`, optional `includeTimeline` |
+| `draft_list` | `projectDir` |
+| `draft_apply` | `projectDir`, `expectedRevision`, `draftId` |
+| `draft_delete` | `projectDir`, `draftId` |
 | `revision_list` | `projectDir` |
+| `revision_compare` | `projectDir`, `fromRevision`, `toRevision` |
 | `revision_restore` | `projectDir`, `expectedRevision`, target `revision` |
+| `graphic_presets` | List the available text graphic styles |
 | `source_preview` | `projectDir`, `expectedRevision`, `assetId`, optional `kind`, `sourceStart`, `sourceEnd`, `scale` |
-| `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale` |
+| `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale`, `draftId` or `revision`, delivery `preset` and `fit` |
 | `color_preview` | `projectDir`, `expectedRevision`, optional output `frame`, `scale` |
-| `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency` |
+| `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency`, delivery `preset` and `fit` |
+| `export_subtitles` | `projectDir`, `expectedRevision`, `outputPath`, `format` of `srt` or `vtt` |
+| `export_timeline` | `projectDir`, `expectedRevision`, `outputPath`, optional `format` of `otio` |
 | `review_cuts` | `projectDir`, `expectedRevision`; optional preview context, batch offset/limit and timing-only mode |
 | `job_list` | `projectDir` |
 | `job_get` | `projectDir`, `jobId`, optional `includePreview` |
 | `job_cancel`, `job_retry` | `projectDir`, `jobId` |
 
-Preview `kind` is `still` or `preview`. Frame ranges use output frames; source preview bounds use source seconds. Transcription and rendering return durable job IDs. Follow `job_get` until completion, failure or cancellation. Completed stills can be returned as MCP images using `includePreview`.
+Preview `kind` is `still` or `preview`. Frame ranges use output frames, and source preview bounds use source seconds. Transcription, rendering, delivery and bundle operations return durable job IDs. Follow `job_get` until completion, failure or cancellation. Completed stills can be returned as MCP images using `includePreview`.
 
 Detached workers preserve jobs after a client disconnects. A local loopback socket serializes workers to limit concurrent resource use. Job metadata is saved under the project's `.engine/jobs/`; shared worker state defaults to the engine's `.cache/`, configurable with `VIDEO_ENGINE_RUNTIME`. Failed or interrupted jobs can be retried when their original project revision remains current.
+
+## Stage and compare edits
+
+`draft_stage` validates the same operation batch accepted by `edit_apply` and returns a draft ID with a diff. The staged snapshot retains generated clip IDs and the base revision. Use `draft_inspect` with `includeTimeline: true` to inspect its compiled frames. `draft_list` shows which proposals can still be applied.
+
+Send the draft ID and current `expectedRevision` to `preview_render`. Use `draft_apply` to save that exact snapshot as one new revision. If the project advances, stage an updated draft against its current revision. `draft_delete` removes a saved proposal.
+
+`revision_compare` summarizes differences between two saved revisions, including clip changes, graphics, captions and duration. To render an older edit, send that saved `revision` and the current `expectedRevision` to `preview_render`. Select either a draft ID or a saved revision per preview. Draft and revision diffs describe the engine timeline. Independent composition code can render a different edit.
+
+## Deliver and move a project
+
+Use `export_render` for a finished MP4 and optionally choose `preset` of `vertical`, `horizontal` or `square`. A preset preserves the output frame clock and uses `contain` by default. Use `fit: "cover"` with a preset to fill the new canvas. Preview the framing with the same `preset` and `fit` in `preview_render`. `export_subtitles` writes the compiled cue text and timing, including when burned-in captions are disabled. `export_timeline` writes a native OpenTimelineIO document with editable media clips, gaps, transition timing and audio placement. Its result lists what the receiving editor may need to rebuild. [Delivery guide](delivery.md)
+
+`project_bundle` packages the current saved revision and registered originals into a new local `bundleDir`. The package includes saved transcripts, custom properties, supported static custom modules and declared public media. Public media includes the targets of symlinks visible to the renderer. Review what the bundle contains before sharing it.
+
+`project_open_bundle` starts a job to verify the files and open them as a separate editable project. Poll `job_get` using the `projectDir` and job `id` returned when it starts. The completed `result.projectDir` is the editable destination. Review the returned limitations if custom code relies on external paths, network resources or runtime imports. Earlier revisions, jobs and finished exports stay with their original project.
+
+`media_relink` repairs moved originals in one revision. Supply a `replacements` entry for each missing asset and the current `expectedRevision`. Each replacement must match its recorded SHA-256. The asset IDs, transcript timing and cut ranges carry forward with the verified files.
 
 ## Map takes inside one source recording
 
@@ -192,7 +222,7 @@ Normal previews and exports use the same corrections. `source_preview` and sourc
 
 ## Automatic audio leveling and manual adjustments
 
-Audio finishing is opt-in. Enable it at project creation with `audio: {"enabled": true}`, or save controls with `edit_apply`:
+Automatic loudness finishing is opt-in. Enable it at project creation with `audio: {"enabled": true}` or save settings with `edit_apply`.
 
 ```json
 {
@@ -214,20 +244,26 @@ Audio finishing is opt-in. Enable it at project creation with `audio: {"enabled"
 | `truePeakDb` | `-1.5` | Maximum encoded output peak, from `-9` to `-0.5` dBTP |
 | `strength` | `1` | Main-track matching strength, from `0` to `1` |
 | `maxGainDb` | `9` | Automatic boost limit, from `0` to `24` dB; also bounds take-matching adjustments |
-| `voiceGainDb` | `0` | Main-track balance relative to music/effects, from `-24` to `24` dB |
+| `voiceGainDb`, `musicGainDb`, `effectsGainDb` | `0` each | Relative gain for the respective audio role, from `-24` to `24` dB |
 | `outputGainDb` | `0` | Overall adjustment after calculating target gain, from `-24` to `24` dB |
+| `ducking` | Off | Lower the music bus in response to the voice signal |
+| `denoise` | Off | Reduce steady background noise in the voice bus |
 
-For “make the video quieter,” lower `outputGainDb`. For voice/music balance, use `voiceGainDb` or overlay volume. A fixed whole-mix target can counteract a global voice change when voice is the only sound, so `voiceGainDb` is not the overall-volume control.
+Use `outputGainDb` to adjust overall loudness when automatic finishing is enabled. Use role gains for relative balance. Version 3 applies all three role gains even with finishing off, including a `voiceGainDb` previously saved in an older project.
 
-For one take, use `set_clip_audio` with manual `gainDb` from `-24` to `24`, or `leveling: false` to exclude it from automatic matching. These fields also work in `set_clips` under each clip's `audio` object. Existing clip `volume` is preserved and multiplies manual gain. Manual clip adjustments remain active when global finishing is off; global voice/output controls apply only while it is on.
+Main clips default to `voice`. Audio and video overlays default to `effects`. Set `audio.role` to `music` on a music bed so music gain and ducking affect it. Custom-layer audio enters the effects stem during role-based mixing.
 
-Automatic matching assumes that main-track audio contains voice. It measures source spans and applies a bounded constant gain. Nearby source fragments share an adjustment so deleting a word does not make every small fragment a new take. Short, silent or unmeasurable spans receive no automatic take gain. Put music/effects in overlays or exclude non-speech main clips. This feature does not detect speech, remove noise or repair distorted recordings.
+Use `set_clip_audio` for an individual clip or include `audio` on a clip or overlay. `gainDb` ranges from `-24` to `24` and multiplies the base `volume` together with role gain. `muted` silences the item, and `leveling: false` exempts a main voice clip from automatic matching. `fadeIn` and `fadeOut` are durations in seconds. An `envelope` is an ordered array of `{time, value}` points with local audio seconds and amplitude multipliers from `0` to `8`. The engine interpolates between points. Set `patch: null` to reset a clip's audio overrides.
 
-Moving previews and exports render the complete composition's audio first, including overlays and custom-layer sound. Floating-point intermediates preserve mixing headroom. One constant gain then approaches the requested loudness while reserving peak headroom, preserving the mix's dynamics. Short previews use a range from this complete master; they are not independently normalized. If an exceptional AAC slice boundary exceeds the peak ceiling, rendering stops with an adjustment recommendation instead of silently changing that preview's level. Still images skip audio processing, and `source_preview` bypasses all edit gains and finishing.
+Set `ducking.enabled` with optional `amountDb` from `0` to `24` (default `10`), `attack` from `0.005` to `2` seconds (default `0.08`), `release` from `0.01` to `5` seconds (default `0.3`) and `thresholdDb` from `-60` to `0` (default `-32`). Set `denoise.enabled` and choose `amount` from `0` to `1` (default `0.35`). Both process the full mix timing before a preview slice. Role gains, manual changes, ducking and denoise each operate independently of automatic loudness finishing.
 
-Read the completed render job's `result.audio` report for source-span gains, requested versus achieved master loudness, actual encoded-file measurements and peak verification. Peak protection and boost limits can make a target unreachable; the report makes that explicit. Verification measures the real output and does not replace listening. Temporary audio masters are deleted after rendering or cancellation; no persistent audio cache or original-file rewrite is created.
+Automatic take matching measures main clips assigned to `voice` and applies a bounded constant gain. Nearby source fragments share an adjustment. Short, silent or unmeasurable spans skip automatic take gain. Audio analysis measures signal levels. Assign the appropriate role to music, effects and any non-speech main clips.
 
-Automatic finishing supports the built-in composition and custom `mode: "layer"`. Independent composition mode must be adapted or have finishing disabled. The floating-point render bridge requires a POSIX shell and is verified on macOS. Automatic finishing reports an actionable error on Windows; other operating systems remain unverified.
+Moving previews and exports that use finishing or role-based stem mixing render the complete composition's audio first. Floating-point intermediates preserve mixing headroom. With finishing enabled, one constant gain approaches the requested loudness while reserving peak headroom. Short previews use a range from this complete master. If an exceptional AAC slice boundary exceeds the ceiling, rendering stops with an adjustment recommendation. Still images skip audio processing, and `source_preview` plays the original audio without edit processing.
+
+Read the completed render job's `result.audio` for role and source-span gains. When enabled, `mix` describes ducking and denoise, and `master`, `encoded` and `peakSafety` describe finishing and the verified output. Peak protection and boost limits can make a target unreachable. Listen to the output as well as reading these measurements. The worker deletes temporary audio masters after rendering or cancellation.
+
+Finishing, ducking and denoise support the built-in composition and custom `mode: "layer"`. For independent compositions, mix audio in the composition or adapt it to layer mode. The floating-point render bridge uses a POSIX shell and installed FFmpeg and is verified on macOS. Windows reports an unsupported-platform error for these processes.
 
 ## Review speech cuts
 
@@ -260,7 +296,13 @@ Custom motion registered with `mode: "layer"` shares the engine clock and is sup
 
 | Operation `type` | Required fields |
 | --- | --- |
-| `set_clips` | `clips`: replace the sequential main timeline |
+| `set_clips` | `clips` to replace the main timeline |
+| `insert_clip` | Zero-based `index` and complete `clip` |
+| `replace_clip` | Existing `clipId` and complete replacement `clip` |
+| `insert_gap` | Zero-based `index`, output `duration` in seconds, optional `id` |
+| `set_gap` | Gap `clipId` and output `duration` in seconds |
+| `set_transition` | Incoming `clipId`, `transition` with `type` and `duration`, or `null` to remove |
+| `set_clip_visual` | `clipId`, `patch` with `fit`, `position`, `crop`, `focus` or `motion` |
 | `split_clip` | `clipId`, `sourceTime`; optional `newClipId` |
 | `remove_clip` | `clipId` |
 | `trim_clip` | `clipId`, `sourceStart`, `sourceEnd` |
@@ -269,21 +311,22 @@ Custom motion registered with `mode: "layer"` shares the engine clock and is sup
 | `delete_words` | `assetId`, `wordIds` |
 | `upsert_overlay` | Complete `overlay` object |
 | `remove_overlay` | `overlayId` |
-| `set_captions` | `patch` with caption-style fields |
+| `set_captions` | `patch` with caption-style fields or explicit `cues` |
+| `set_caption_cues` | `cues` with `{id, text, start, end}` entries, or `null` to regenerate from words |
 | `set_settings` | `patch` with output settings |
-| `set_audio` | `patch` with automatic leveling and output-loudness controls |
-| `set_clip_audio` | `clipId`, `patch` with `leveling` and/or manual `gainDb` |
+| `set_audio` | `patch` with mix, leveling, finishing, ducking and denoise settings |
+| `set_clip_audio` | `clipId`, `patch` with audio role, gain, trims, offset, fades or envelope, or `null` to reset |
 | `set_asset_color` | `assetId`, `patch` with source color controls; `null` resets all local controls |
 | `set_clip_color` | `clipId`, `patch` with color overrides; `null` restores full inheritance |
 | `set_custom` | `custom` composition metadata, or `null` to use the built-in composition |
 
-A main clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. `fit` can also be `"contain"`. Optional `position` contains pixel values `{x,y,width,height}`. Optional `audio` contains `leveling` (default `true`) and manual `gainDb` (default `0`). Manual clip gain multiplies the existing `volume` and also works with automatic finishing disabled. Optional `color` contains partial source-color overrides.
+A media clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. The `contain` fit keeps the full picture visible. Optional `position` contains pixel values `{x, y, width, height}`. Optional `color` contains source-color overrides. A gap uses `{id, type: "gap", duration}` instead of source media and displays the project background.
 
-An overlay has `id`, `type`, `start` and `end`. Its type is `text`, `image`, `video` or `audio`. Text overlays need `text`; other types need an appropriate `assetId`. Timed overlays support optional `sourceStart` and `volume`. The `style` object supports positioning, size, opacity, crop, typography and `fadeInFrames`/`fadeOutFrames`.
+An overlay has `id`, `type`, `start` and `end`. Its type is `text`, `image`, `video` or `audio`. Text overlays need `text`, and media overlays need a matching `assetId`. Media overlays accept `sourceStart` and `volume`. The `style` object supports positioning, size, opacity, typography and `fadeInFrames`/`fadeOutFrames`. Audio and video overlays accept an `audio` role and volume controls. Their source timing follows the overlay's own `assetId`, `sourceStart`, `start` and `end`.
 
-Output settings are `width`, `height`, integer `fps` from 1 to 120, and `background`. Caption fields are `enabled`, `fontSize`, `color`, `highlightColor`, `bottom` and `wordsPerPage`.
+Output settings are `width`, `height`, integer `fps` from 1 to 120, and `background`. Caption fields are `enabled`, `fontSize`, `color`, `highlightColor`, `bottom`, `wordsPerPage` and optional `cues`.
 
-Example edit request:
+This request deletes a source interval and attaches a styled callout to a retained word.
 
 ```json
 {
@@ -293,7 +336,7 @@ Example edit request:
     {"type": "delete_source_range", "assetId": "camera", "start": 2.1, "end": 3.4},
     {"type": "set_captions", "patch": {"enabled": true, "wordsPerPage": 4}},
     {"type": "upsert_overlay", "overlay": {
-      "id": "callout", "type": "text", "text": "Look here", "start": 0, "end": 2,
+      "id": "callout", "type": "text", "preset": "callout", "text": "Look here", "start": 0, "end": 2,
       "anchor": {"assetId": "camera", "wordId": "w42", "offset": 0.1},
       "style": {"fontSize": 56, "top": 100, "height": 120, "fadeInFrames": 5}
     }}
@@ -303,9 +346,31 @@ Example edit request:
 
 `delete_source_range` affects every retained occurrence of that source interval. Use clip-specific trimming or removal to change one occurrence. Overlay positions and durations are not automatically inferred from spoken content.
 
+## Transitions and split audio cuts
+
+Put an incoming transition on the second clip with `set_transition`. Its type is `crossfade`, `dip` or `wipe`. Duration is in output seconds, with at least two frames and at most 30 seconds. The transition uses the retained end of the first clip and the retained start of the second. The clips overlap, which shortens their combined time by the overlap duration. The overlaps at both ends of a clip must fit inside its duration. Use a gap to insert time on the output clock.
+
+Use `set_clip_audio` to start audio ahead of picture or carry it past a cut. `sourceStart` and `sourceEnd` select the audio range in source seconds. Supply both together. `assetId` optionally selects a separate registered sound source. `offset` moves the sound relative to the picture start in output seconds. A negative value starts it earlier, and time before frame zero is trimmed. The clip's playback rate also applies to its sound. Late audio can extend the output duration.
+
+For example, `{"assetId":"recorded-voice","sourceStart":1.2,"sourceEnd":3.4,"offset":-0.2,"fadeIn":0.05}` starts the selected voice 0.2 seconds before the picture. Inspect `audioFrom`, `audioDurationInFrames`, `audioSourceFrame` and `audioAssetId` in the compiled timeline. Sound following its picture crossfades across an overlapping join. Independently placed sound uses its saved fades and volume envelope. Use the audio source bounds to trim replacement sound. `delete_words` cuts main media ranges.
+
+## Reframe and animate
+
+`set_clip_visual` accepts `position`, `fit`, `crop`, `focus` and `motion`. Use `null` on a field to clear its override. A `crop` sets fractions to remove from the left, right, top or bottom and must leave visible picture. A `focus` sets normalized `x` and `y` from `0` to `1` for object positioning. The default focus is the center. `cover` uses the available canvas, and `contain` shows the whole picture inside it.
+
+Set `motion` on a main visual clip or overlay using any of `x`, `y`, `scale`, `rotation` and `opacity`. Each control takes ordered `{time, value, easing?}` points. Time is in seconds from the item's output start. Position values use pixels, rotation uses degrees, scale is a multiplier, and opacity is `0` to `1`. `linear`, `easeInOut` and `hold` specify the curve from that point toward the next. For example, `{"scale":[{"time":0,"value":1,"easing":"easeInOut"},{"time":1,"value":1.12}]}` makes a slow zoom over the first second.
+
+`graphic_presets` lists `title`, `lower_third` and `callout`. Set `preset` on a text overlay and use `style` or `motion` to customize it. Standard graphics follow the engine clock. Use a custom layer for more involved animation.
+
+## Edit caption cues
+
+Source words from the main voice clips are retimed into automatic caption pages. With split audio, the pages follow its selected source and output placement. To change wording, line breaks or display timing, send `set_caption_cues` with ordered cues containing `id`, `text`, `start` and `end`. Cue times are output seconds. Each cue needs at least one output frame, and cues cannot overlap. Use a newline in `text` for a new line.
+
+Manual cues are fixed to output time. After changing cuts, review their timing or send `cues: null` to return to automatic pages. An empty array gives no cues. The source transcript and its stable word IDs continue to drive word-based cuts and anchors. Inspect `timeline.captionCues` for the displayed cues and `timeline.captions` for the retimed source words. SRT and VTT exports use the compiled cue timing. [Delivery guide](delivery.md)
+
 ## Source timing and word anchors
 
-The manifest stores source seconds without independently rounding every cut. Compilation rounds cumulative output boundaries onto one integer frame clock. This prevents accumulated duration drift across many cuts. Captions follow retained clips, including repeats, reordering and playback-rate changes.
+The manifest stores source seconds. Compilation rounds cumulative output boundaries onto one integer frame clock to prevent duration drift across cuts. Automatic captions follow retained voice ranges, including repeats, reordering, independent audio timing and playback-rate changes.
 
 Words retain stable IDs and original source times. Native point timestamps, where start equals end, compile as one-frame captions. Deleting a point-timed word raises a timing error because it has no measured speech interval.
 
@@ -317,7 +382,7 @@ An optional overlay `anchor` attaches it to a source word:
 
 The stored `end - start` supplies duration. The compiled start follows the edited word plus `offset`, clamped to zero. Removing the speech suppresses its overlay. The first edited occurrence is selected by default; `clipId` selects a specific occurrence. Omit `anchor` for absolute output timing.
 
-Overlay endpoints extend the composition when needed. Overlay-only titles, graphics and audio projects can have an empty main timeline.
+Overlay and audible clip endpoints can extend the composition. Overlay-only titles, graphics and audio projects can have an empty main timeline.
 
 ## Version 2 import naming
 

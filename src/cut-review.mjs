@@ -6,7 +6,7 @@ import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
 import {renderProject} from './render.mjs';
 import {toolEnv} from './media.mjs';
-import {resolveAudioSettings, resolveClipAudio} from './audio-settings.mjs';
+import {resolveAudioSettings, resolveClipAudio, volumeAt} from './audio-settings.mjs';
 import {colorTransform} from './color-settings.mjs';
 
 const invalid = (message) => { throw Object.assign(new Error(message), {code: 'INVALID_REVIEW_REQUEST'}); };
@@ -34,17 +34,23 @@ export function analyzeCutBoundaries(project) {
   const cuts = [];
   for (let index = 1; index < timeline.clips.length; index++) {
     const left = timeline.clips[index - 1], right = timeline.clips[index];
+    if (left.type === 'gap' || right.type === 'gap') continue;
     const leftAudio = resolveClipAudio(left.audio), rightAudio = resolveClipAudio(right.audio);
-    const contiguous = left.assetId === right.assetId && Math.abs(left.sourceEnd - right.sourceStart) < 1e-7 &&
+    const contiguous = !right.transition && left.assetId === right.assetId && Math.abs(left.sourceEnd - right.sourceStart) < 1e-7 &&
       left.playbackRate === right.playbackRate && left.volume === right.volume && left.fit === right.fit &&
       leftAudio.gainDb === rightAudio.gainDb && (!audio.enabled || leftAudio.leveling === rightAudio.leveling) &&
       JSON.stringify(colorTransform(left.color)) === JSON.stringify(colorTransform(right.color)) &&
+      JSON.stringify(leftAudio) === JSON.stringify(rightAudio) &&
+      JSON.stringify([left.crop, left.focus, left.motion]) === JSON.stringify([right.crop, right.focus, right.motion]) &&
       JSON.stringify(left.position ?? null) === JSON.stringify(right.position ?? null);
     if (contiguous) continue;
-    const leftWords = wordBoundary(project, left, left.sourceEnd, 'left');
-    const rightWords = wordBoundary(project, right, right.sourceStart, 'right');
+    const leftWords = wordBoundary(project, {...left, assetId: left.audioAssetId}, left.audio?.sourceEnd ?? left.sourceEnd, 'left');
+    const rightWords = wordBoundary(project, {...right, assetId: right.audioAssetId}, right.audio?.sourceStart ?? right.sourceStart, 'right');
     const evidence = [...leftWords.evidence, ...rightWords.evidence];
-    cuts.push({id: `cut-${cuts.length + 1}`, index: cuts.length, outputFrame: right.from, outputTime: right.from / timeline.fps,
+    const outputFrame = right.from + Math.floor((right.transitionFrames ?? 0) / 2);
+    cuts.push({id: `cut-${cuts.length + 1}`, index: cuts.length, outputFrame, outputTime: outputFrame / timeline.fps,
+      ...(right.transition ? {transition: {...right.transition, startFrame: right.from, endFrame: right.from + right.transitionFrames},
+        assessmentNote: 'This join overlaps. Audio measurements include both clips during the transition.'} : {}),
       left: {clipId: left.id, assetId: left.assetId, sourceTime: left.sourceEnd},
       right: {clipId: right.id, assetId: right.assetId, sourceTime: right.sourceStart},
       wordTiming: {left: leftWords, right: rightWords},
@@ -118,12 +124,13 @@ export function analyzeAudioSamples(samples, {sampleRate, cutSample, channels = 
 function audibleNear(timeline, cut, side) {
   const assets = new Map(timeline.assets.map((asset) => [asset.id, asset]));
   const hasAudio = (assetId) => {const asset = assets.get(assetId); return asset?.type === 'audio' || asset?.hasAudio === true;};
-  const source = side === 'left' ? cut.left : cut.right;
-  const clip = timeline.clips.find((entry) => entry.id === source.clipId);
-  if (clip && clip.volume > 0 && hasAudio(clip.assetId)) return true;
   const frame = cut.outputFrame + (side === 'left' ? -0.25 : 0.25);
+  if (timeline.clips.some(clip => clip.type !== 'gap' && hasAudio(clip.audioAssetId) && clip.audioFrom <= frame &&
+    clip.audioFrom + clip.audioDurationInFrames > frame && volumeAt(clip.audio, (frame - clip.audioFrom) / timeline.fps,
+      clip.audioDurationInFrames / timeline.fps, clip.volume ?? 1) > 0)) return true;
   return timeline.overlays.some((overlay) => ['audio', 'video'].includes(overlay.type) && (overlay.volume ?? 1) > 0 &&
-    overlay.from <= frame && overlay.from + overlay.durationInFrames > frame && hasAudio(overlay.assetId));
+    overlay.from <= frame && overlay.from + overlay.durationInFrames > frame && hasAudio(overlay.assetId) &&
+    volumeAt(overlay.audio, (frame - overlay.from) / timeline.fps, overlay.durationInFrames / timeline.fps, overlay.volume ?? 1) > 0);
 }
 
 async function decodeAudio(file, {signal, sampleRate = 16000, channels = 2} = {}) {

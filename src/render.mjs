@@ -13,6 +13,7 @@ import {validateProject} from './project.mjs';
 import {assertAssets, run, toolEnv} from './media.mjs';
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {analyzeAudio, finishAudioMaster, prepareVoiceGains} from './audio-processing.mjs';
+import {needsStemMix, mixAudioStems} from './audio-mixer.mjs';
 import {isColorCorrectionActive} from './color-settings.mjs';
 
 const engineRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -295,19 +296,43 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
   const raw = join(work, 'master-raw.wav'), finished = join(work, 'master-finished.wav');
   const binariesDirectory = await floatAudioBinaries(work, signal);
   report(onProgress, {stage: 'audio_master', progress: 0});
-  await renderMedia({...common, outputLocation: raw, codec: 'wav', audioCodec: 'pcm-16',
-    sampleRate: audioSampleRate, binariesDirectory, enforceAudioTrack: true, concurrency,
-    frameRange: [0, composition.durationInFrames - 1],
-    onProgress: (update) => report(onProgress, {stage: 'audio_master', ...update})});
+  let mix;
+  const renderStem = async (outputLocation, role) => {
+    const inputProps = role ? {...common.inputProps, timeline: {...common.inputProps.timeline, audioRenderRole: role}} : common.inputProps;
+    await renderMedia({...common, inputProps, composition: {...common.composition, props: {...common.composition.props, ...inputProps}},
+      outputLocation, codec: 'wav', audioCodec: 'pcm-16',
+      sampleRate: audioSampleRate, binariesDirectory, enforceAudioTrack: true, concurrency,
+      frameRange: [0, composition.durationInFrames - 1],
+      onProgress: (update) => report(onProgress, {stage: role ? `audio_${role}` : 'audio_master', ...update})});
+    checkAbort(signal);
+    await verifyFloatMaster(outputLocation, {frames: composition.durationInFrames, fps: composition.fps, signal});
+  };
+  if (needsStemMix(settings)) {
+    const stems = {};
+    for (const role of ['voice', 'music', 'effects']) {
+      stems[role] = join(work, `${role}.wav`);
+      await renderStem(stems[role], role);
+    }
+    const {outputPath: temporaryMixPath, ...mixReport} = await mixAudioStems(stems, raw, settings, {signal, onProgress});
+    mix = mixReport;
+  } else await renderStem(raw);
   checkAbort(signal);
   await verifyFloatMaster(raw, {frames: composition.durationInFrames, fps: composition.fps, signal});
-  const masterReport = await finishAudioMaster(raw, finished, settings, {signal,
-    onProgress: (update) => report(onProgress, {...update, stage: 'audio_finish'})});
+  const masterReport = settings.enabled ? await finishAudioMaster(raw, finished, settings, {signal,
+    onProgress: (update) => report(onProgress, {...update, stage: 'audio_finish'})}) : null;
   checkAbort(signal);
   const video = join(work, 'video-muted.mp4');
   await renderMedia({...common, outputLocation: video, codec: 'h264', pixelFormat: 'yuv420p',
     frameRange, concurrency, crf: kind === 'preview' ? 25 : 18, muted: true, colorSpace: 'bt709',
     onProgress: (update) => report(onProgress, {stage: 'render', ...update})});
+  if (!settings.enabled) {
+    const encoded = await muxMasterRange(video, raw, partial, frameRange, composition.fps, signal);
+    assertMeasuredOutput(encoded);
+    return {enabled: false, settings, scope: 'full_timeline_mix', voice, mix,
+      encoded, encodedScope: 'requested_frame_range', frameRange, sampleRate: audioSampleRate, codec: 'aac',
+      limitations: ['Automatic loudness finishing is disabled. The complete voice, music and effects mix is sliced for previews and exports.',
+        'Custom-layer sound is assigned to the effects bus. Encoded measurements do not establish listening quality.']};
+  }
   let currentMaster = finished, additionalGainDb = 0, encoded, fullEncoded;
   // Only the complete AAC master determines common gain. A range-specific
   // encoding boundary must never silently alter the level of a preview.
@@ -337,7 +362,7 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
     if (highestPeak <= settings.truePeakDb) {
       await link(candidate, partial);
       const finalMaster = additionalGainDb === 0 ? masterReport.after : await analyzeAudio(currentMaster, {signal});
-      return {enabled: true, settings, scope: 'full_timeline_master', voice,
+      return {enabled: true, settings, scope: 'full_timeline_master', voice, ...(mix ? {mix} : {}),
         master: {...masterReport, after: finalMaster,
           appliedGainDb: masterReport.appliedGainDb + additionalGainDb,
           peakLimited: masterReport.peakLimited || additionalGainDb < 0,
@@ -382,13 +407,28 @@ export async function renderProject(project, options = {}) {
   validateProject(project);
   await assertAssets(project);
   let timeline = compileTimeline(project);
+  if (timeline.custom && timeline.custom.mode !== 'layer' && (project.captions.cues != null ||
+    project.clips.some(clip => clip.type === 'gap' || clip.transition || clip.crop || clip.focus || clip.motion ||
+      clip.audio?.sourceStart !== undefined || clip.audio?.assetId !== undefined || clip.audio?.offset) ||
+    project.overlays.some(overlay => overlay.preset || overlay.motion || overlay.crop || overlay.focus))) {
+    throw Object.assign(new Error('Saved timeline controls require engine rendering. Adapt custom motion to custom.mode="layer" to use gaps, transitions, framing, motion, independent sound and edited captions.'),
+      {code: 'UNSUPPORTED_CUSTOM_EDIT_CONTROLS'});
+  }
+  const activeSoundControls = (audio, defaultRole) => audio && (audio.muted || audio.fadeIn || audio.fadeOut || audio.envelope?.length ||
+    audio.curveOffset || audio.curveDuration || (audio.role && audio.role !== defaultRole));
+  if (timeline.custom && timeline.custom.mode !== 'layer' &&
+    (project.clips.some(clip => activeSoundControls(clip.audio, 'voice')) || project.overlays.some(overlay => activeSoundControls(overlay.audio, 'effects')) ||
+      project.audio?.musicGainDb || project.audio?.effectsGainDb)) {
+    throw Object.assign(new Error('Saved sound roles, fades, envelopes and mixing controls require the engine timeline or custom.mode="layer".'),
+      {code: 'UNSUPPORTED_CUSTOM_AUDIO'});
+  }
   if (timeline.custom && timeline.custom.mode !== 'layer' &&
     [...timeline.assets, ...timeline.clips, ...timeline.overlays].some((entry) => isColorCorrectionActive(entry.color))) {
     throw Object.assign(new Error('Saved color controls require the engine timeline. Use custom.mode="layer" or reset the asset and clip color controls for a standalone composition.'),
       {code: 'UNSUPPORTED_CUSTOM_COLOR'});
   }
   const audioSettings = resolveAudioSettings(project.audio);
-  if (kind !== 'still' && audioSettings.enabled && timeline.custom && timeline.custom.mode !== 'layer') {
+  if (kind !== 'still' && (audioSettings.enabled || needsStemMix(audioSettings)) && timeline.custom && timeline.custom.mode !== 'layer') {
     throw audioFailure('Audio finishing needs the engine timeline. Use custom.mode:"layer" or disable audio.enabled for a standalone custom composition.',
       'UNSUPPORTED_CUSTOM_AUDIO');
   }
@@ -462,7 +502,7 @@ export async function renderProject(project, options = {}) {
         : composition.durationInFrames - 1, composition.durationInFrames, 'toFrame');
       if (to < from) throw new Error('toFrame must be at or after fromFrame (inclusive)');
       frameRange = [from, to];
-      if (audioSettings.enabled) {
+      if (audioSettings.enabled || needsStemMix(audioSettings)) {
         audio = await renderFinishedAudio({common, work, composition, concurrency, frameRange, partial,
           kind, settings: audioSettings, voice: audio.voice, signal, onProgress});
       } else {

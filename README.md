@@ -2,23 +2,18 @@
 
 A video editor that your AI agent operates through chat.
 
-The editor runs on your computer. Your agent can cut footage, add captions and graphics, check edits and export a finished video. There is no separate editor window or timeline for you to operate.
-
-You describe the result you want. The agent makes editing decisions and uses this app's tools to carry them out. The app provides the editing engine, saved project and video output.
+Describe the video you want in chat. Your agent uses the editor on your computer to build a draft, show previews and export a finished video. Your project keeps links to the original recordings and saves a history of the edit.
 
 ## What it can do
 
-- Cut, trim and rearrange footage, including cuts based on transcript words.
-- Map possible retakes inside one recording, with timestamps and picture previews.
-- Add captions, text, images, music and sound.
-- Level voice audio automatically, with adjustable volume and per-take controls.
-- Adjust footage brightness, contrast and color, with before-and-after previews.
-- Create custom motion graphics that follow the edit.
-- Keep graphics attached to spoken words as the timing changes.
-- Make still previews and short video previews for review.
-- Flag potentially clipped words, sudden volume changes and long quiet gaps around cuts.
-- Save edit history so earlier versions can be restored.
-- Export a new video while preserving the original files.
+- Find possible retakes inside one recording and preview the matching source ranges.
+- Stage a draft, preview the exact changes and apply it as a saved revision. Compare or restore earlier versions.
+- Cut by transcript words, insert pauses and blend neighboring clips. Start sound before the picture changes or let it continue afterward.
+- Reframe footage, adjust its color and animate changes in position, size or opacity.
+- Balance voice, music and effects. Lower music under speech and reduce mild background noise.
+- Edit caption wording, line breaks and timing. Add reusable titles, name labels and callouts, or attach graphics to spoken words.
+- Export vertical, wide or square video, subtitle files and an editable timeline for compatible editors.
+- Move a project with its source media or reconnect a recording that moved.
 
 These checks help find places to review. You still need to watch and listen to the finished video.
 
@@ -26,20 +21,20 @@ These checks help find places to review. You still need to watch and listen to t
 
 **Developer preview.** The editing, rendering and agent connection have been tested on macOS using generated sample videos. Other operating systems have not been verified.
 
-Setup currently requires some terminal use and separately installed tools. The app does not include its own AI assistant. You need a chat agent that supports MCP and local files. MCP is the connection that lets the agent use the editor's tools.
+Setup uses a terminal and a chat agent that supports MCP and local files. MCP is the connection that gives your agent access to the editor's tools.
 
 ## Get started
 
-You will need:
+You will need these local tools.
 
 - Node.js 22 or newer.
 - FFmpeg, including `ffmpeg` and `ffprobe`.
 - An installed Chrome or Chromium browser to create the finished video.
-- For local transcription only: the speech tool and model described in the [setup reference](docs/technical-reference.md#requirements-and-setup).
+- The speech tool and model if you want the engine to transcribe recordings. [Setup reference](docs/technical-reference.md#requirements-and-setup)
 
 Download this project and open a terminal in its folder. If you use an AI coding agent, it can help with these setup steps.
 
-Run:
+Run these commands in the project folder.
 
 ```sh
 npm ci
@@ -48,35 +43,37 @@ node src/cli.mjs doctor
 
 The first command installs the app's dependencies. The second checks which local tools are available. It may report missing transcription tools even if you only want to use an existing transcript.
 
-Then follow the [agent connection instructions](docs/technical-reference.md#mcp-connection). Your agent can start the editor when it needs it. Browser and speech-model downloads are handled separately.
+Your agent can start the editor when it needs it. Reconnect the MCP server after an update so your agent sees the new tools. [Agent connection instructions](docs/technical-reference.md#mcp-connection)
 
 ## Try your first video
 
-Keep your original footage in a local folder, connect your agent, and give it the file path and your editing brief. For example:
+Keep your original footage in a local folder and give your connected agent the file path and a brief.
 
-> Use this recording to make a shorter edit. Preserve my wording, remove the retakes we identify, add readable captions and show me a preview before the final export.
+> Use this recording to draft a shorter edit. Preserve my wording, remove the retakes we identify and add readable captions. Show me the draft before applying it. Then export a vertical version and an SRT subtitle file.
 
-The agent can inspect the recording, build the edit and return previews. Tell it what to change, then review the final playback and sound before using the export.
+Review the preview and tell your agent what to change. Watch and listen to the final export before using it.
 
 ## All your takes in one recording
 
 Keep recording the way you normally do. The agent can use the transcript to find pauses, restarts and repeated passages inside the same file. A saved map links those possible attempts to timestamps and picture previews.
 
-The agent can search a line, preview the different versions and compare your delivery before choosing cuts. Repeated wording is a clue, not a verdict about the best take. The map leaves your recording and edit unchanged.
-
-For tool details, advanced graphics and troubleshooting, see the [technical reference](docs/technical-reference.md).
+The agent can search a line and preview its different deliveries before choosing cuts. Repeated wording suggests places to review.
 
 ## Adjust the sound through chat
 
-Ask your agent to enable automatic audio leveling. It can match voice levels across takes and control the finished video's loudness while preserving your original recording.
+Ask your agent to level voice across takes, lower music while you speak, or adjust one sound independently. You can also ask it to fade a sound in or out, move the sound ahead of a cut, or reduce mild background noise.
 
-You can then say "make it quieter," "lower this take," or "turn automatic leveling off." The agent saves those adjustments and creates another preview. Previews use the same complete audio mix as the export, so a short sample is not leveled separately.
+The agent saves those adjustments with the edit and uses the complete audio mix for previews and exports.
 
 ## Adjust the picture through chat
 
-Ask your agent to brighten a recording, reduce a yellow cast or adjust its color intensity. A saved correction follows each cut from that recording. You can adjust one clip separately, compare the same frame before and after, or undo the change.
+Ask your agent to brighten a recording, keep a person in frame, or slowly zoom in on a detail. A saved color correction can follow every cut from one recording or be adjusted clip by clip. Compare the same frame before and after to choose the look.
 
-The color controls apply to the footage. Captions and graphics keep their own colors. Use an agent that supports local MCP servers and can access your footage.
+## Deliver or move the edit
+
+Ask for an MP4 in the shape you need, an SRT or VTT subtitle file, or an editable OpenTimelineIO file. The timeline handoff carries media and cuts. Bring the finished MP4 to show the intended graphics, color and mix. [Delivery guide](docs/delivery.md)
+
+Use a project bundle to move the editable engine project and its media to another machine. A bundle includes saved transcripts, custom settings and registered media. Review its contents before sharing. Your agent can also reconnect a moved file after verifying that its contents match the original. [Technical reference](docs/technical-reference.md)
 
 ## Licensing
 

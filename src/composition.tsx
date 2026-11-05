@@ -1,5 +1,7 @@
-import React, {createContext, useContext, useId, useMemo} from 'react';
+import React, {createContext, useContext, useId} from 'react';
 import {colorTransform} from './color-settings.mjs';
+import {motionStyle, transitionStyle, GRAPHIC_PRESETS} from './edit-controls.mjs';
+import {volumeAt} from './audio-settings.mjs';
 import {
   AbsoluteFill, Audio, Composition, Img, OffthreadVideo, Sequence,
   useCurrentFrame,
@@ -10,6 +12,7 @@ type Timeline = {
   fps: number; width: number; height: number; durationInFrames: number;
   assets: Asset[]; clips: any[]; overlays: any[]; captions: any[];
   settings?: Record<string, any>; captionsStyle?: Record<string, any>;
+  captionCues?: any[]; audioRenderRole?: string;
 };
 export type EngineProps = {timeline: Timeline; customLayerProps?: Record<string, unknown>};
 const CustomLayerContext = createContext<React.ComponentType<any> | null>(null);
@@ -68,84 +71,105 @@ function MediaColorDefinition({color}: {color: ReturnType<typeof useMediaColor>}
 }
 
 function Clip({clip, timeline}: {clip: any; timeline: Timeline}) {
+  const frame = useCurrentFrame();
   const asset = getAsset(timeline, clip.assetId);
   const color = useMediaColor(clip.color);
-  const volume = clip.volume ?? 1;
-  const style: React.CSSProperties = {...mediaStyle, objectFit: clip.fit ?? 'contain',
-    ...(clip.position ? {position: 'absolute', left: clip.position.x, top: clip.position.y,
-      width: clip.position.width, height: clip.position.height} : {}), filter: color.filter};
-  if (asset.type === 'image') return <><MediaColorDefinition color={color}/><Img src={asset.src} style={style}/></>;
-  if (asset.type === 'audio') return <Audio src={asset.src} trimBefore={clip.sourceFrame}
-    playbackRate={clip.playbackRate ?? 1} volume={volume}/>;
-  return <><MediaColorDefinition color={color}/><OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
-    playbackRate={clip.playbackRate ?? 1} volume={volume}
-    muted={volume === 0 || asset.hasAudio === false}
-    style={style}/></>;
+  const moving = motionStyle(clip.motion, frame, timeline.fps, clip.motionTimeOffset), transition = transitionStyle(clip, frame);
+  const crop = clip.crop ?? {}, w = 1 - (crop.left ?? 0) - (crop.right ?? 0), h = 1 - (crop.top ?? 0) - (crop.bottom ?? 0);
+  const style: React.CSSProperties = {position: 'absolute', left: `${-(crop.left ?? 0) / w * 100}%`, top: `${-(crop.top ?? 0) / h * 100}%`,
+    width: `${100 / w}%`, height: `${100 / h}%`, objectFit: clip.fit ?? 'contain',
+    objectPosition: `${(clip.focus?.x ?? .5) * 100}% ${(clip.focus?.y ?? .5) * 100}%`, filter: color.filter};
+  if (asset.type === 'audio') return null;
+  return <div style={{position: 'absolute', inset: 0, overflow: 'hidden',
+    ...(clip.position ? {left: clip.position.x, top: clip.position.y, width: clip.position.width, height: clip.position.height, right: 'auto', bottom: 'auto'} : {}),
+    ...moving, ...transition, opacity: moving.opacity * transition.opacity}}>
+    <MediaColorDefinition color={color}/>
+    {asset.type === 'image' ? <Img src={asset.src} style={style}/> : <OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
+      playbackRate={clip.playbackRate ?? 1} muted style={style}/>}
+  </div>;
+}
+
+function ClipSound({clip, timeline}: {clip: any; timeline: Timeline}) {
+  const asset = getAsset(timeline, clip.audioAssetId ?? clip.assetId);
+  const audio = clip.audio ?? {}, role = audio.role ?? 'voice';
+  if (audio.muted || asset.type === 'image' || asset.hasAudio === false || (timeline.audioRenderRole && timeline.audioRenderRole !== role)) return null;
+  // Remotion supplies callback frames relative to the played Audio element.
+  const gain = (frame: number) => {
+    const time = frame / timeline.fps;
+    let volume = volumeAt({...audio, curveOffset: (audio.curveOffset ?? 0) + (clip.audioTrimmedSeconds ?? 0),
+      curveDuration: audio.curveDuration ?? clip.audioOriginalDurationSeconds}, time, clip.audioDurationInFrames / timeline.fps, clip.volume ?? 1);
+    if (clip.audioFollowsPicture) {
+      if (clip.transitionFrames) volume *= Math.min(1, Math.max(0, frame / (clip.transitionFrames - 1)));
+      if (clip.outgoingTransitionFrames) volume *= Math.min(1, Math.max(0, (clip.durationInFrames - 1 - frame) / (clip.outgoingTransitionFrames - 1)));
+    }
+    return volume;
+  };
+  return <Audio src={asset.src} trimBefore={clip.audioSourceFrame ?? clip.sourceFrame}
+    playbackRate={clip.playbackRate ?? 1} volume={gain}/>;
 }
 
 function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
   const frame = useCurrentFrame();
   const color = useMediaColor(overlay.color);
-  const style = overlayStyle(overlay.style, frame, overlay.durationInFrames);
+  const baseStyle = {...(GRAPHIC_PRESETS as any)[overlay.preset], ...overlay.style};
+  const style = overlayStyle(baseStyle, frame, overlay.durationInFrames);
+  const moving = motionStyle(overlay.motion, frame, timeline.fps);
+  Object.assign(style, {transform: [style.transform, moving.transform].filter(Boolean).join(' '), opacity: Number(style.opacity ?? 1) * moving.opacity});
   if (overlay.type === 'text') return <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'white', fontSize: 56, fontFamily: 'Arial, sans-serif', whiteSpace: 'pre-wrap', ...style}}>{overlay.text}</div>;
   const asset = getAsset(timeline, overlay.assetId);
   const trimBefore = Math.round((overlay.sourceStart ?? 0) * timeline.fps);
-  if (overlay.type === 'audio') return <Audio src={asset.src} trimBefore={trimBefore} volume={overlay.volume ?? 1}/>;
-  const mediaStyle = {objectFit: 'contain' as const, ...style, filter: color.filter};
-  if (overlay.type === 'image') return <><MediaColorDefinition color={color}/><Img src={asset.src} style={mediaStyle}/></>;
-  return <><MediaColorDefinition color={color}/><OffthreadVideo src={asset.src} trimBefore={trimBefore} volume={overlay.volume ?? 1}
-    muted={overlay.volume === 0 || asset.hasAudio === false} style={mediaStyle}/></>;
+  const audio = overlay.audio ?? {}, role = audio.role ?? 'effects';
+  const hasSound = !audio.muted && asset.type !== 'image' && asset.hasAudio !== false && (!timeline.audioRenderRole || timeline.audioRenderRole === role);
+  const sound = hasSound ? <Audio src={asset.src} trimBefore={trimBefore}
+    volume={f => volumeAt(audio, f / timeline.fps, overlay.durationInFrames / timeline.fps, overlay.volume ?? 1)}/> : null;
+  if (overlay.type === 'audio') return sound;
+  const crop = overlay.crop ?? {}, w = 1 - (crop.left ?? 0) - (crop.right ?? 0), h = 1 - (crop.top ?? 0) - (crop.bottom ?? 0);
+  const pictureStyle: React.CSSProperties = {position: 'absolute', left: `${-(crop.left ?? 0) / w * 100}%`, top: `${-(crop.top ?? 0) / h * 100}%`,
+    width: `${100 / w}%`, height: `${100 / h}%`, objectFit: baseStyle.objectFit ?? 'contain',
+    objectPosition: baseStyle.objectPosition ?? `${(overlay.focus?.x ?? .5) * 100}% ${(overlay.focus?.y ?? .5) * 100}%`, filter: color.filter};
+  return <><div style={{...style, overflow: 'hidden'}}><MediaColorDefinition color={color}/>
+    {overlay.type === 'image' ? <Img src={asset.src} style={pictureStyle}/> : <OffthreadVideo src={asset.src} trimBefore={trimBefore} muted style={pictureStyle}/>}
+  </div>{sound}</>;
 }
 
 function CaptionPages({timeline}: {timeline: Timeline}) {
   const frame = useCurrentFrame();
   const style = timeline.captionsStyle ?? {};
-  const pageSize = Math.min(50, Math.max(1, Math.floor(style.wordsPerPage ?? 5)));
-  const pages = useMemo(() => {
-    const words = timeline.captions.filter((word) => word.endFrame > word.startFrame)
-      .slice().sort((a, b) => a.startFrame - b.startFrame);
-    const result: any[][] = [];
-    for (const word of words) {
-      const page = result[result.length - 1];
-      const previous = page?.[page.length - 1];
-      if (!page || page.length >= pageSize || previous.clipId !== word.clipId ||
-        word.startFrame - previous.endFrame > timeline.fps * .4) result.push([word]);
-      else page.push(word);
-    }
-    return result;
-  }, [timeline.captions, timeline.fps, pageSize]);
-  if (style.enabled === false) return null;
-  const pageIndex = pages.findIndex((page, index) => frame >= page[0].startFrame &&
-    frame < Math.min(page[page.length - 1].endFrame, pages[index + 1]?.[0].startFrame ?? Infinity));
-  if (pageIndex < 0) return null;
-  const page = pages[pageIndex];
-  let active = -1;
-  page.forEach((word, index) => {if (word.startFrame <= frame) active = index;});
-  return <div style={{position: 'absolute', left: '5%', width: '90%', bottom: style.bottom ?? 100,
-    display: 'flex', justifyContent: 'center', zIndex: 1000, fontFamily: 'Arial, sans-serif'}}>
-    <div style={{display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '0 .22em',
-      padding: '.18em .35em', borderRadius: 12, backgroundColor: 'rgba(0,0,0,.78)',
-      fontSize: style.fontSize ?? 56, lineHeight: 1.2, fontWeight: 700, textAlign: 'center'}}>
-      {page.map((word, index) => <span key={`${word.id}-${word.startFrame}-${index}`}
-        style={{color: index === active ? style.highlightColor ?? '#ffd860' : style.color ?? '#ffffff'}}>{word.text}</span>)}
-    </div>
-  </div>;
+  if (timeline.captionCues) {
+    if (style.enabled === false) return null;
+    const cue = timeline.captionCues.find(c => frame >= c.startFrame && frame < c.endFrame);
+    if (!cue) return null;
+    const active = cue.words?.findLastIndex((word: any) => word.startFrame <= frame);
+    return <div style={{position: 'absolute', left: '5%', width: '90%', bottom: style.bottom ?? 100, display: 'flex', justifyContent: 'center', zIndex: 1000, fontFamily: 'Arial, sans-serif'}}>
+      <div style={{padding: '.18em .35em', borderRadius: 12, backgroundColor: 'rgba(0,0,0,.78)', fontSize: style.fontSize ?? 56, lineHeight: 1.2,
+        fontWeight: 700, textAlign: 'center', whiteSpace: 'pre-wrap', color: style.color ?? '#ffffff'}}>
+        {cue.words ? cue.words.map((word: any, i: number) => <React.Fragment key={`${word.id}-${i}`}>
+          {i ? ' ' : ''}<span style={{color: i === active ? style.highlightColor ?? '#ffd860' : style.color ?? '#ffffff'}}>{word.text}</span>
+        </React.Fragment>) : cue.text}
+      </div>
+    </div>;
+  }
+  return null;
 }
 
 export function TimelineComposition({timeline, customLayerProps}: EngineProps) {
   const CustomLayer = useContext(CustomLayerContext);
   return <AbsoluteFill style={{backgroundColor: timeline.settings?.background ?? '#000000'}}>
     <AbsoluteFill style={{zIndex: 0, isolation: 'isolate'}}>
-      {timeline.clips.map((clip) => <Sequence key={clip.id} from={clip.from} durationInFrames={clip.durationInFrames}>
+      {timeline.clips.filter(clip => clip.type !== 'gap').map((clip) => <Sequence key={clip.id} from={clip.from} durationInFrames={clip.durationInFrames}>
         <Clip clip={clip} timeline={timeline}/>
+      </Sequence>)}
+      {timeline.clips.filter(clip => clip.type !== 'gap' && clip.audioDurationInFrames > 0).map(clip => <Sequence key={`audio-${clip.id}`}
+        from={clip.audioFrom} durationInFrames={clip.audioDurationInFrames} layout="none">
+        <ClipSound clip={clip} timeline={timeline}/>
       </Sequence>)}
       {timeline.overlays.map((overlay) => <Sequence key={overlay.id} from={overlay.from}
         durationInFrames={overlay.durationInFrames} layout={overlay.type === 'audio' ? 'none' : 'absolute-fill'}>
         <Overlay overlay={overlay} timeline={timeline}/>
       </Sequence>)}
     </AbsoluteFill>
-    {CustomLayer ? <AbsoluteFill style={{zIndex: 1, isolation: 'isolate'}}>
+    {CustomLayer && (!timeline.audioRenderRole || timeline.audioRenderRole === 'effects') ? <AbsoluteFill style={{zIndex: 1, isolation: 'isolate'}}>
       <CustomLayer {...customLayerProps} timeline={timeline}/>
     </AbsoluteFill> : null}
     <AbsoluteFill style={{zIndex: 2, isolation: 'isolate'}}><CaptionPages timeline={timeline}/></AbsoluteFill>

@@ -30,17 +30,25 @@ async function fixture(t, {duration = 8, amplitude = (time) => time < 3 ? .04 : 
   return {directory, source, project};
 }
 
-test('manual clip adjustments stay effective while disabled global controls are bypassed', async () => {
-  const project = {audio: {enabled: false, voiceGainDb: -3}, assets: [{id: 'voice', type: 'audio'}]};
+test('manual clip and role adjustments work with automatic finishing disabled', async () => {
+  const project = {audio: {enabled: false, voiceGainDb: -3, musicGainDb: -6}, assets: [{id: 'voice', type: 'audio'}]};
   const timeline = {fps: 30, clips: [{id: 'clip', assetId: 'voice', volume: .5, audio: {gainDb: -6},
-    from: 0, durationInFrames: 30}], overlays: [{id: 'music', volume: .2}]};
+    from: 0, durationInFrames: 30}], overlays: [{id: 'music', type: 'audio', volume: .2, audio: {role: 'music'}},
+    {id: 'effect', type: 'video', volume: .4, audio: {gainDb: 3}}, {id: 'title', type: 'text'}]};
   const original = structuredClone(timeline);
   const {timeline: prepared, report} = await prepareVoiceGains(project, timeline);
   assert.deepEqual(timeline, original);
-  assert.deepEqual(prepared.overlays, original.overlays);
-  assert.ok(Math.abs(prepared.clips[0].volume - .5 * 10 ** (-6 / 20)) < 1e-8);
+  assert.deepEqual(prepared.overlays[2], original.overlays[2]);
+  assert.ok(Math.abs(prepared.clips[0].volume - .5 * 10 ** (-9 / 20)) < 1e-8);
+  assert.ok(Math.abs(prepared.overlays[0].volume - .2 * 10 ** (-6 / 20)) < 1e-8);
+  assert.ok(Math.abs(prepared.overlays[1].volume - .4 * 10 ** (3 / 20)) < 1e-8);
   assert.equal(report.clips[0].automaticGainDb, 0);
-  assert.equal(report.clips[0].manualGainDb, -6);
+  assert.equal(report.clips[0].manualGainDb, -9);
+  assert.deepEqual(report.overlays.map(({role}) => role), ['music', 'effects']);
+  const stems = await prepareVoiceGains({...project, audio: {...project.audio, effectsGainDb: -9}}, timeline);
+  assert.equal(stems.report.roleGainStage, 'stem_mixer');
+  assert.ok(Math.abs(stems.timeline.clips[0].volume - .5 * 10 ** (-6 / 20)) < 1e-8);
+  assert.equal(stems.timeline.overlays[0].volume, .2);
 });
 
 test('real source measurements balance separate takes while nearby edit fragments share a gain', real, async (t) => {

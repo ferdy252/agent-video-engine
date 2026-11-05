@@ -45,8 +45,14 @@ try {
       await delay(300, undefined, {signal: controller.signal});
     }
   }
-  await update({status: 'running', stage: 'Checking original assets', startedAt: new Date().toISOString()});
-  await assertAssets(job.snapshot);
+  if (await isCancelled(dir)) controller.abort();
+  controller.signal.throwIfAborted();
+  const openingBundle = job.type === 'project_open_bundle';
+  const creatingBundle = job.type === 'project_bundle';
+  await update({status: 'running', stage: openingBundle ? 'Checking project bundle'
+    : creatingBundle ? 'Packaging project files' : 'Checking original assets', startedAt: new Date().toISOString()});
+  // Bundle copies verify the fingerprints as they stream, without reading large files twice.
+  if (!openingBundle && !creatingBundle) await assertAssets(job.snapshot);
   const onProgress = (value, label) => {
     const progress = typeof value === 'object' ? value.progress : value;
     const stage = typeof value === 'object' ? value.stage : label;
@@ -54,7 +60,11 @@ try {
       ...(stage ? {stage} : {})}).catch(() => controller.abort());
   };
   let result;
-  if (job.type === 'transcribe') {
+  if (openingBundle) {
+    const {openProjectBundle} = await import('./portability.mjs');
+    result = await openProjectBundle(job.request.bundleDir, {projectDir: job.destinationProjectDir,
+      signal: controller.signal, onProgress});
+  } else if (job.type === 'transcribe') {
     const asset = job.snapshot.assets.find(item => item.id === job.request.assetId);
     if (!asset) throw new Error('Unknown transcript asset');
     const output = await transcribeAsset(projectDir, asset, {...job.request, signal: controller.signal, onProgress});
@@ -81,9 +91,19 @@ try {
     const {reviewCuts} = await import('./cut-review.mjs');
     result = await reviewCuts(job.snapshot, {...job.request, projectDir,
       outputDir: join(projectDir, '.engine/reviews', id), signal: controller.signal, onProgress});
+  } else if (creatingBundle) {
+    const {createProjectBundle} = await import('./portability.mjs');
+    result = await createProjectBundle(job.snapshot, {...job.request, signal: controller.signal, onProgress});
+  } else if (job.type === 'export_subtitles' || job.type === 'export_timeline') {
+    const delivery = await import('./delivery.mjs');
+    result = await delivery[job.type === 'export_subtitles' ? 'exportSubtitles' : 'exportTimeline'](job.snapshot, {...job.request, signal: controller.signal, onProgress});
   } else if (job.type === 'render') {
     const {renderProject} = await import('./render.mjs');
     let renderSnapshot = job.snapshot;
+    if (job.request.preset) {
+      const {applyDeliveryPreset} = await import('./delivery.mjs');
+      renderSnapshot = applyDeliveryPreset(renderSnapshot, job.request);
+    }
     if (job.request.sourcePreview) {
       const asset = job.snapshot.assets.find(item => item.id === job.request.assetId);
       if (!asset) throw new Error('Unknown source asset');

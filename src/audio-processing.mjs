@@ -1,6 +1,7 @@
 import {run} from './media.mjs';
 import {open, rm} from 'node:fs/promises';
 import {resolveAudioSettings, resolveClipAudio} from './audio-settings.mjs';
+import {needsStemMix} from './audio-mixer.mjs';
 
 const finite = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -10,6 +11,16 @@ const progress = (observer, value, stage) => {try {observer?.({progress: value, 
 const headroomDb = .5;
 const minimumDuration = .4;
 const quietFloorDb = -65;
+
+function gainForRole(settings, role) {
+  if (role === 'music') return settings.musicGainDb;
+  if (role === 'effects') return settings.effectsGainDb;
+  return settings.voiceGainDb;
+}
+
+function audioSourceId(clip) {
+  return clip.audioAssetId ?? clip.audio?.assetId ?? clip.assetId;
+}
 
 async function probeAudio(file, signal) {
   const {stdout} = await run('ffprobe', ['-v', 'error', '-show_entries',
@@ -49,24 +60,29 @@ export async function analyzeAudio(file, {signal} = {}) {
   return measure(file, {...info, signal});
 }
 
-/** Main clips are assumed voice. Near-contiguous fragments share a constant gain. */
+/** Main clips default to voice. Near-contiguous voice fragments share a constant gain. */
 export async function prepareVoiceGains(project, timeline, {signal, onProgress} = {}) {
   checkAbort(signal);
   const settings = resolveAudioSettings(project.audio), assets = new Map(project.assets.map((asset) => [asset.id, asset]));
+  const roleGainStage = needsStemMix(settings) ? 'stem_mixer' : 'track';
   const result = structuredClone(timeline), groups = [], membership = new Map(), metadata = new Map();
   const candidates = result.clips.filter((clip) => {
-    const asset = assets.get(clip.assetId), audio = resolveClipAudio(clip.audio);
-    return settings.enabled && settings.strength > 0 && audio.leveling && (clip.volume ?? 1) > 0 &&
+    const asset = assets.get(audioSourceId(clip)), audio = resolveClipAudio(clip.audio);
+    return settings.enabled && settings.strength > 0 && clip.type !== 'gap' && !audio.muted &&
+      (audio.role ?? 'voice') === 'voice' && audio.leveling && (clip.volume ?? 1) > 0 &&
+      (clip.audioDurationInFrames ?? clip.durationInFrames) > 0 &&
       asset && asset.type !== 'image' && asset.hasAudio !== false;
-  }).map((clip) => ({clip, rate: clip.playbackRate ?? 1,
-    start: Number.isFinite(clip.sourceFrame) ? clip.sourceFrame / timeline.fps : clip.sourceStart,
-    end: (Number.isFinite(clip.sourceFrame) ? clip.sourceFrame / timeline.fps : clip.sourceStart) +
-      clip.durationInFrames / timeline.fps * (clip.playbackRate ?? 1)}))
-    .sort((a, b) => a.clip.assetId.localeCompare(b.clip.assetId) || a.rate - b.rate || a.start - b.start);
+  }).map((clip) => {
+    const rate = clip.playbackRate ?? 1;
+    const sourceFrame = clip.audioSourceFrame ?? clip.sourceFrame;
+    const start = Number.isFinite(sourceFrame) ? sourceFrame / timeline.fps : clip.audio?.sourceStart ?? clip.sourceStart;
+    const duration = (clip.audioDurationInFrames ?? clip.durationInFrames) / timeline.fps;
+    return {clip, assetId: audioSourceId(clip), rate, start, end: start + duration * rate};
+  }).sort((a, b) => a.assetId.localeCompare(b.assetId) || a.rate - b.rate || a.start - b.start);
   for (const candidate of candidates) {
     let group = groups.at(-1);
-    if (!group || group.assetId !== candidate.clip.assetId || group.playbackRate !== candidate.rate || candidate.start > group.sourceEnd + .5) {
-      group = {id: `voice-span-${groups.length + 1}`, assetId: candidate.clip.assetId,
+    if (!group || group.assetId !== candidate.assetId || group.playbackRate !== candidate.rate || candidate.start > group.sourceEnd + .5) {
+      group = {id: `voice-span-${groups.length + 1}`, assetId: candidate.assetId,
         sourceStart: candidate.start, sourceEnd: candidate.end, playbackRate: candidate.rate, clips: []};
       groups.push(group);
     } else group.sourceEnd = Math.max(group.sourceEnd, candidate.end);
@@ -93,25 +109,39 @@ export async function prepareVoiceGains(project, timeline, {signal, onProgress} 
     progress(onProgress, (index + 1) / Math.max(1, groups.length), `Measuring voice span ${index + 1}/${groups.length}`);
   }
   const clips = result.clips.map((clip) => {
-    const audio = resolveClipAudio(clip.audio), asset = assets.get(clip.assetId), group = membership.get(clip.id);
+    if (clip.type === 'gap') return {clipId: clip.id, status: 'gap', automaticGainDb: 0, manualGainDb: 0, effectiveVolume: 0};
+    const audio = resolveClipAudio(clip.audio), asset = assets.get(audioSourceId(clip)), group = membership.get(clip.id);
+    const role = audio.role ?? 'voice';
     const automaticGainDb = group?.automaticGainDb ?? 0;
-    const manualGainDb = audio.gainDb + (settings.enabled ? settings.voiceGainDb : 0);
-    const effectiveVolume = (clip.volume ?? 1) * decibels(automaticGainDb + manualGainDb);
+    const roleGainDb = gainForRole(settings, role);
+    const manualGainDb = audio.gainDb + (roleGainStage === 'track' ? roleGainDb : 0);
+    const effectiveVolume = audio.muted ? 0 : (clip.volume ?? 1) * decibels(automaticGainDb + manualGainDb);
     clip.volume = effectiveVolume;
-    return {clipId: clip.id, groupId: group?.id ?? null,
+    return {clipId: clip.id, assetId: audioSourceId(clip), role, roleGainDb, groupId: group?.id ?? null,
       status: group?.analysis.status ?? (asset?.hasAudio === false || asset?.type === 'image' ? 'missing_audio'
-        : (clip.volume === 0 ? 'muted' : !audio.leveling ? 'opted_out' : 'disabled')),
+        : (clip.volume === 0 ? 'muted' : role !== 'voice' ? 'role_gain_only' : !audio.leveling ? 'opted_out' : 'disabled')),
       measuredLufs: group?.analysis.integratedLufs ?? null, automaticGainDb, manualGainDb, effectiveVolume};
   });
+  const overlays = [];
+  for (const overlay of result.overlays ?? []) {
+    if (overlay.type !== 'audio' && overlay.type !== 'video') continue;
+    const audio = resolveClipAudio(overlay.audio);
+    const role = audio.role ?? 'effects';
+    const roleGainDb = gainForRole(settings, role);
+    const manualGainDb = audio.gainDb + (roleGainStage === 'track' ? roleGainDb : 0);
+    overlay.volume = audio.muted ? 0 : (overlay.volume ?? 1) * decibels(manualGainDb);
+    overlays.push({overlayId: overlay.id, role, roleGainDb, manualGainDb, effectiveVolume: overlay.volume});
+  }
   checkAbort(signal);
-  return {timeline: result, report: {enabled: settings.enabled, settings, scope: 'main_timeline_clips',
-    counts: {clips: clips.length, groups: groups.length}, clips: clips.slice(0, 100), clipsTruncated: clips.length > 100,
+  return {timeline: result, report: {enabled: settings.enabled, settings, scope: 'main_timeline_clips', roleGainStage,
+    counts: {clips: clips.length, groups: groups.length, overlays: overlays.length}, clips: clips.slice(0, 100), clipsTruncated: clips.length > 100,
+    overlays: overlays.slice(0, 100), overlaysTruncated: overlays.length > 100,
     groups: groups.slice(0, 100).map((group) => ({...group, clips: group.clips.slice(0, 50),
       clipCount: group.clips.length, clipsTruncated: group.clips.length > 50})), groupsTruncated: groups.length > 100,
-    limitations: ['Main-timeline clips are assumed to contain voice. This is level measurement, not speech detection.',
+    limitations: ['Main clips default to voice and overlays default to effects. Automatic take leveling measures main voice clips.',
       'Nearby fragments share a constant gain to preserve emphasis. Short, silent or unmeasurable spans receive no automatic gain.',
       'Source gaps of at most half a second may be included when measuring fragments of the same recording.',
-      'Music and effects in overlays do not receive automatic voice gain. Existing clip volume and manual adjustments are applied after measurement.']}};
+      'Role gains and manual clip or overlay adjustments are applied after take measurement and remain active with automatic finishing disabled.']}};
 }
 
 /** Finish the complete project mix with constant gain, preserving its dynamics. */

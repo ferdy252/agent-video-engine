@@ -2,8 +2,10 @@ import {randomUUID} from 'node:crypto';
 import {statSync} from 'node:fs';
 import {mkdir, open, readFile, rename, unlink, readdir} from 'node:fs/promises';
 import path from 'node:path';
-import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateClipAudio} from './audio-settings.mjs';
+import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateClipAudio, mergeAudioSettings} from './audio-settings.mjs';
 import {applyColorPatch, validateColorSettings} from './color-settings.mjs';
+import {fileFingerprint} from './media.mjs';
+import {validateVisual, validateSequence, validateCaptionCues, GRAPHIC_PRESETS} from './edit-controls.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
 
@@ -62,7 +64,7 @@ function sourceBounds(asset, start, end, name, {allowPoint = false} = {}) {
 }
 
 /** Validate both the manifest and referenced local files. No original is ever written. */
-export function validateProject(project) {
+export function validateProject(project, {allowMissingAssets = false} = {}) {
   object(project, 'project');
   if (project.schemaVersion !== 1) fail('Unsupported project schemaVersion.');
   string(project.id, 'project.id');
@@ -85,7 +87,10 @@ export function validateProject(project) {
   const assets = new Map();
   for (const asset of project.assets) {
     if (!['video', 'audio', 'image'].includes(asset.type)) fail(`Invalid asset type: ${asset.type}.`);
-    existingFile(asset.path, `asset ${asset.id}.path`);
+    if (allowMissingAssets) {
+      string(asset.path, `asset ${asset.id}.path`);
+      if (!path.isAbsolute(asset.path)) fail('Asset paths must be absolute.');
+    } else existingFile(asset.path, `asset ${asset.id}.path`);
     number(asset.duration, `asset ${asset.id}.duration`, {min: 0});
     if (asset.type !== 'image' && asset.duration <= 0) fail(`Asset ${asset.id} must have positive duration.`);
     for (const key of ['width', 'height']) if (asset[key] !== undefined) number(asset[key], `asset.${key}`, {min: 1, integer: true});
@@ -117,12 +122,25 @@ export function validateProject(project) {
     }
   }
   for (const clip of project.clips) {
+    if (clip.type === 'gap') {
+      number(clip.duration, 'gap.duration', {min: 1 / project.settings.fps});
+      if (Object.keys(clip).some(key => !['id', 'type', 'duration'].includes(key))) fail('Gaps support only id, type and duration.');
+      continue;
+    }
+    if (clip.type !== undefined && clip.type !== 'media') fail('Unknown clip type.');
     const asset = assets.get(clip.assetId);
     if (!asset) fail(`Clip references unknown asset: ${clip.assetId}.`);
     sourceBounds(asset, clip.sourceStart, clip.sourceEnd, `clip ${clip.id}`);
     number(clip.playbackRate, 'clip.playbackRate', {min: 0.01, max: 16});
     number(clip.volume, 'clip.volume', {min: 0, max: 8});
     if (clip.audio !== undefined) validateClipAudio(clip.audio);
+    const sound = clip.audio ?? {}, audioAsset = assets.get(sound.assetId ?? clip.assetId);
+    if (!audioAsset) fail('Clip audio references an unknown asset.');
+    if (sound.assetId !== undefined && audioAsset.type === 'image') fail('Clip audio needs a video or audio asset.');
+    if ((sound.sourceStart === undefined) !== (sound.sourceEnd === undefined)) fail('Set both audio source bounds together.');
+    if (sound.assetId !== undefined || sound.sourceStart !== undefined) sourceBounds(audioAsset, sound.sourceStart ?? clip.sourceStart, sound.sourceEnd ?? clip.sourceEnd, `clip ${clip.id} audio`);
+    if (sound.assetId !== undefined && audioAsset.hasAudio === false) fail('Replacement audio asset has no audio stream.');
+    validateVisual(clip);
     if (clip.color !== undefined) {
       if (asset.type === 'audio') fail('Color controls require an image or video clip.');
       validateColorSettings(clip.color);
@@ -134,6 +152,7 @@ export function validateProject(project) {
       for (const key of ['width', 'height']) number(clip.position[key], `clip.position.${key}`, {min: Number.EPSILON});
     }
   }
+  validateSequence(project.clips, project.settings.fps);
   for (const overlay of project.overlays) {
     if (!['text', 'image', 'video', 'audio'].includes(overlay.type)) fail('Invalid overlay type.');
     number(overlay.start, 'overlay.start', {min: 0});
@@ -152,7 +171,7 @@ export function validateProject(project) {
       if (overlay.anchor.clipId !== undefined) {
         string(overlay.anchor.clipId, 'overlay.anchor.clipId');
         const anchoredClip = project.clips.find((entry) => entry.id === overlay.anchor.clipId);
-        if (anchoredClip && anchoredClip.assetId !== overlay.anchor.assetId) fail('Overlay anchor clip must use the anchored source asset.');
+        if (anchoredClip && (anchoredClip.audio?.assetId ?? anchoredClip.assetId) !== overlay.anchor.assetId) fail('Overlay anchor clip must use the anchored spoken source asset.');
       }
     }
     if (overlay.type === 'text') string(overlay.text, 'overlay.text');
@@ -164,6 +183,12 @@ export function validateProject(project) {
       sourceBounds(asset, sourceStart, sourceStart + overlay.end - overlay.start, `overlay ${overlay.id}`);
     }
     if (overlay.volume !== undefined) number(overlay.volume, 'overlay.volume', {min: 0, max: 8});
+    if (overlay.audio !== undefined) {
+      validateClipAudio(overlay.audio);
+      if (['assetId', 'sourceStart', 'sourceEnd', 'offset'].some(key => overlay.audio[key] !== undefined)) fail('Overlay audio uses the overlay assetId, sourceStart and output start/end.');
+    }
+    validateVisual(overlay);
+    if (overlay.preset !== undefined && (overlay.type !== 'text' || !Object.hasOwn(GRAPHIC_PRESETS, overlay.preset))) fail('Choose a known text graphic preset.');
     if (overlay.style !== undefined) {
       object(overlay.style, 'overlay.style');
       jsonData(overlay.style, 'overlay.style');
@@ -175,6 +200,13 @@ export function validateProject(project) {
   number(project.captions.bottom, 'captions.bottom', {min: 0});
   number(project.captions.wordsPerPage, 'captions.wordsPerPage', {min: 1, max: 50, integer: true});
   for (const key of ['color', 'highlightColor']) string(project.captions[key], `captions.${key}`);
+  validateCaptionCues(project.captions.cues);
+  let previousCaptionEnd = 0;
+  for (const cue of project.captions.cues ?? []) {
+    const start = Math.round(cue.start * project.settings.fps), end = Math.round(cue.end * project.settings.fps);
+    if (start < previousCaptionEnd || end <= start) fail('Caption cues must occupy separate output frames and last at least one frame.');
+    previousCaptionEnd = end;
+  }
   if (project.custom !== undefined && project.custom !== null) {
     object(project.custom, 'custom');
     existingFile(project.custom.entryPoint, 'custom.entryPoint');
@@ -287,14 +319,34 @@ export async function createProject(projectDir, options = {}) {
     return persist(projectDir, project);
   });
 }
-export async function loadProject(projectDir) {
+export async function createProjectFromSnapshot(projectDir, snapshot) {
+  return withLock(projectDir, async () => {
+    try { await readFile(projectPath(projectDir)); fail('Project already exists.', 'PROJECT_EXISTS'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const project = clone(snapshot);
+    validateProject(project);
+    return persist(projectDir, project);
+  });
+}
+export async function loadProject(projectDir, options) {
   const project = await readJson(projectPath(projectDir));
-  validateProject(project);
+  validateProject(project, options);
   return project;
+}
+export async function mutateProject(projectDir, {expectedRevision, allowMissingAssets = false}, update) {
+  return withLock(projectDir, async () => {
+    const project = await loadProject(projectDir, {allowMissingAssets});
+    checkRevision(project, expectedRevision);
+    await update(project);
+    project.revision++;
+    project.updatedAt = new Date().toISOString();
+    validateProject(project);
+    return persist(projectDir, project);
+  });
 }
 function normalizeClips(clips) {
   array(clips, 'clips');
-  return clips.map((clip) => ({playbackRate: 1, volume: 1, fit: 'cover', ...clip}));
+  return clips.map((clip) => clip.type === 'gap' ? clip : ({playbackRate: 1, volume: 1, fit: 'cover', ...clip}));
 }
 function findClip(project, id) {
   const index = project.clips.findIndex((clip) => clip.id === id);
@@ -308,10 +360,41 @@ function cutSource(project, assetId, start, end) {
   project.clips = project.clips.flatMap((clip) => {
     if (clip.assetId !== assetId || end <= clip.sourceStart || start >= clip.sourceEnd) return [clip];
     const retained = [];
-    if (start > clip.sourceStart) retained.push({...clip, sourceEnd: start});
-    if (end < clip.sourceEnd) retained.push({...clip, id: retained.length ? `${clip.id}-${randomUUID()}` : clip.id, sourceStart: end});
+    if (start > clip.sourceStart) retained.push(sliceClip(clip, clip.sourceStart, start));
+    if (end < clip.sourceEnd) retained.push({...sliceClip(clip, end, clip.sourceEnd), id: retained.length ? `${clip.id}-${randomUUID()}` : clip.id});
     return retained;
   });
+}
+function sliceClip(clip, start, end) {
+  if (clip.type === 'gap') fail('Use set_gap to change a gap.');
+  const result = clone(clip), rate = clip.playbackRate ?? 1;
+  const offset = (start - clip.sourceStart) / rate, duration = (end - start) / rate;
+  result.sourceStart = start; result.sourceEnd = end;
+  if (offset !== 0) delete result.transition;
+  if (clip.motion) result.motionTimeOffset = (clip.motionTimeOffset ?? 0) + offset;
+  if (clip.audio) {
+    const original = clip.audio, audio = result.audio;
+    const sourceStart = original.sourceStart ?? clip.sourceStart;
+    const sourceEnd = original.sourceEnd ?? clip.sourceEnd;
+    const audioFrom = original.offset ?? 0;
+    const audioDuration = (sourceEnd - sourceStart) / rate;
+    const audioEnd = audioFrom + audioDuration;
+    const retainedFrom = start === clip.sourceStart ? audioFrom : Math.max(audioFrom, offset);
+    const retainedEnd = end === clip.sourceEnd ? audioEnd : Math.min(audioEnd, offset + duration);
+    if (retainedEnd <= retainedFrom) audio.muted = true;
+    else {
+      if (original.sourceStart !== undefined || original.offset) {
+        audio.sourceStart = sourceStart + (retainedFrom - audioFrom) * rate;
+        audio.sourceEnd = audio.sourceStart + (retainedEnd - retainedFrom) * rate;
+        audio.offset = retainedFrom - offset;
+      }
+      if (original.fadeIn || original.fadeOut || original.envelope?.length || original.curveDuration) {
+        audio.curveOffset = (original.curveOffset ?? 0) + retainedFrom - audioFrom;
+        audio.curveDuration = original.curveDuration ?? audioDuration;
+      }
+    }
+  }
+  return result;
 }
 function applyOperation(project, operation) {
   object(operation, 'operation');
@@ -326,20 +409,53 @@ function applyOperation(project, operation) {
       break;
     }
     case 'set_clips': project.clips = normalizeClips(clone(operation.clips)); break;
+    case 'insert_clip': {
+      number(operation.index, 'index', {min: 0, max: project.clips.length, integer: true});
+      project.clips.splice(operation.index, 0, normalizeClips([clone(operation.clip)])[0]);
+      break;
+    }
+    case 'replace_clip': project.clips.splice(findClip(project, operation.clipId), 1, normalizeClips([clone(operation.clip)])[0]); break;
+    case 'insert_gap': {
+      number(operation.index, 'index', {min: 0, max: project.clips.length, integer: true});
+      project.clips.splice(operation.index, 0, {id: operation.id ?? randomUUID(), type: 'gap', duration: operation.duration});
+      break;
+    }
+    case 'set_gap': {
+      const clip = project.clips[findClip(project, operation.clipId)];
+      if (clip.type !== 'gap') fail('set_gap needs a gap clip.');
+      clip.duration = operation.duration; break;
+    }
+    case 'set_transition': {
+      const clip = project.clips[findClip(project, operation.clipId)];
+      if (operation.transition === null) delete clip.transition;
+      else clip.transition = clone(operation.transition);
+      break;
+    }
+    case 'set_clip_visual': {
+      const clip = project.clips[findClip(project, operation.clipId)];
+      if (clip.type === 'gap') fail('A gap has no visual controls.');
+      object(operation.patch, 'patch');
+      for (const [key, value] of Object.entries(operation.patch)) {
+        if (!['fit', 'position', 'crop', 'focus', 'motion'].includes(key)) fail(`Unknown visual control ${key}.`);
+        if (value === null) {if (key === 'fit') clip.fit = 'cover'; else delete clip[key];}
+        else clip[key] = clone(value);
+        if (key === 'motion') delete clip.motionTimeOffset;
+      }
+      break;
+    }
     case 'split_clip': {
       const index = findClip(project, operation.clipId);
       const clip = project.clips[index];
       number(operation.sourceTime, 'sourceTime');
       if (operation.sourceTime <= clip.sourceStart || operation.sourceTime >= clip.sourceEnd) fail('Split must be inside the clip.');
-      project.clips.splice(index, 1, {...clip, sourceEnd: operation.sourceTime},
-        {...clip, id: operation.newClipId ?? `${clip.id}-${randomUUID()}`, sourceStart: operation.sourceTime});
+      project.clips.splice(index, 1, sliceClip(clip, clip.sourceStart, operation.sourceTime),
+        {...sliceClip(clip, operation.sourceTime, clip.sourceEnd), id: operation.newClipId ?? `${clip.id}-${randomUUID()}`});
       break;
     }
     case 'remove_clip': project.clips.splice(findClip(project, operation.clipId), 1); break;
     case 'trim_clip': {
-      const clip = project.clips[findClip(project, operation.clipId)];
-      clip.sourceStart = operation.sourceStart;
-      clip.sourceEnd = operation.sourceEnd;
+      const index = findClip(project, operation.clipId);
+      project.clips[index] = sliceClip(project.clips[index], operation.sourceStart, operation.sourceEnd);
       break;
     }
     case 'reorder_clips': {
@@ -378,16 +494,23 @@ function applyOperation(project, operation) {
       break;
     }
     case 'set_captions': object(operation.patch, 'patch'); project.captions = {...project.captions, ...clone(operation.patch)}; break;
+    case 'set_caption_cues': project.captions.cues = clone(operation.cues); break;
     case 'set_settings': object(operation.patch, 'patch'); project.settings = {...project.settings, ...clone(operation.patch)}; break;
     case 'set_audio': {
       validateAudioSettings(operation.patch);
-      project.audio = {...resolveAudioSettings(project.audio), ...clone(operation.patch)};
+      project.audio = mergeAudioSettings(project.audio, clone(operation.patch));
       break;
     }
     case 'set_clip_audio': {
-      validateClipAudio(operation.patch);
       const clip = project.clips[findClip(project, operation.clipId)];
+      if (clip.type === 'gap') fail('A gap has no source audio.');
+      if (operation.patch === null) {delete clip.audio; break;}
+      validateClipAudio(operation.patch);
       clip.audio = {...resolveClipAudio(clip.audio), ...clone(operation.patch)};
+      if (['fadeIn', 'fadeOut', 'envelope', 'assetId', 'sourceStart', 'sourceEnd', 'offset'].some(key => Object.hasOwn(operation.patch, key))) {
+        if (!Object.hasOwn(operation.patch, 'curveOffset')) delete clip.audio.curveOffset;
+        if (!Object.hasOwn(operation.patch, 'curveDuration')) delete clip.audio.curveDuration;
+      }
       break;
     }
     case 'set_asset_color': {
@@ -401,6 +524,7 @@ function applyOperation(project, operation) {
     }
     case 'set_clip_color': {
       const clip = project.clips[findClip(project, operation.clipId)];
+      if (clip.type === 'gap') fail('A gap has no source color.');
       const asset = project.assets.find((entry) => entry.id === clip.assetId);
       if (asset.type === 'audio') fail('Color controls require an image or video clip.');
       const color = applyColorPatch(clip.color, operation.patch);
@@ -417,17 +541,60 @@ function checkRevision(project, expectedRevision) {
   if (project.revision !== expectedRevision) fail(`Expected revision ${expectedRevision}, current revision is ${project.revision}. Reload before editing.`, 'REVISION_CONFLICT');
 }
 export async function applyOperations(projectDir, {expectedRevision, operations}) {
-  array(operations, 'operations');
-  if (!operations.length) fail('At least one operation is required.');
   return withLock(projectDir, async () => {
-    const project = await loadProject(projectDir);
-    checkRevision(project, expectedRevision);
-    for (const operation of operations) applyOperation(project, operation);
+    const current = await loadProject(projectDir);
+    checkRevision(current, expectedRevision);
+    const project = prepareOperations(current, operations);
     project.revision++;
     project.updatedAt = new Date().toISOString();
     validateProject(project);
     return persist(projectDir, project);
   });
+}
+/** Build the exact proposed state without writing or assigning a new revision. */
+export function prepareOperations(current, operations) {
+  array(operations, 'operations');
+  if (!operations.length || operations.length > 1000) fail('Supply 1 to 1000 operations.');
+  const project = clone(current);
+  for (const operation of operations) applyOperation(project, operation);
+  validateProject(project);
+  return project;
+}
+/** Commit a validated draft verbatim so generated IDs match its preview. */
+export async function commitProjectSnapshot(projectDir, {expectedRevision, snapshot}) {
+  return withLock(projectDir, async () => {
+    const current = await loadProject(projectDir);
+    checkRevision(current, expectedRevision);
+    const project = clone(snapshot);
+    if (project.id !== current.id || project.revision !== current.revision || project.createdAt !== current.createdAt) {
+      fail('Snapshot belongs to a different project or base revision.', 'REVISION_CONFLICT');
+    }
+    project.revision++;
+    project.updatedAt = new Date().toISOString();
+    validateProject(project);
+    return persist(projectDir, project);
+  });
+}
+async function rebindRelinkedAssets(snapshot, current) {
+  const currentAssets = new Map(current.assets.map((asset) => [asset.id, asset]));
+  for (const asset of snapshot.assets) {
+    const replacement = currentAssets.get(asset.id);
+    if (!replacement || replacement.path === asset.path || !asset.fingerprint || replacement.fingerprint !== asset.fingerprint) continue;
+    if (await fileFingerprint(asset.path).catch(() => null) === asset.fingerprint) continue;
+    if (await fileFingerprint(replacement.path) !== asset.fingerprint) {
+      fail(`Neither saved path has the original bytes for asset ${asset.id}.`, 'SOURCE_CHANGED');
+    }
+    asset.path = replacement.path;
+  }
+  return snapshot;
+}
+
+export async function readProjectRevision(projectDir, revision) {
+  number(revision, 'revision', {min: 0, integer: true});
+  const current = await loadProject(projectDir);
+  const snapshot = await readJson(revisionPath(projectDir, revision));
+  if (snapshot.id !== current.id || snapshot.revision !== revision || revision > current.revision) fail('Invalid revision.', 'REVISION_NOT_FOUND');
+  return rebindRelinkedAssets(snapshot, current);
 }
 export async function restoreRevision(projectDir, {expectedRevision, revision}) {
   number(revision, 'revision', {min: 0, integer: true});
@@ -439,6 +606,7 @@ export async function restoreRevision(projectDir, {expectedRevision, revision}) 
     try { project = await readJson(revisionPath(projectDir, revision)); }
     catch (error) { if (error.code === 'PROJECT_NOT_FOUND') fail(`Revision ${revision} does not exist.`, 'REVISION_NOT_FOUND'); throw error; }
     if (project.id !== current.id || project.revision !== revision) fail('Revision belongs to a different project.', 'INVALID_PROJECT');
+    await rebindRelinkedAssets(project, current);
     project.revision = current.revision + 1;
     project.updatedAt = new Date().toISOString();
     validateProject(project);

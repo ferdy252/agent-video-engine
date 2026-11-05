@@ -27,10 +27,16 @@ tokens*.json
 
 # Saved editor projects and local worker state
 project.json
+bundle.json
+bundle-files/
 .project.lock
 .history/
 .engine/
+.engine-import-*/
+.engine-bundle-*/
 .agent-video-render-*/
+.agent-video-delivery-*/
+.audio-mix-*/
 .cache/
 cache/
 caches/
@@ -84,6 +90,7 @@ test-results/
 *.srt
 *.vtt
 *.ass
+*.otio
 
 # Local transcription and machine-learning models
 transcripts/

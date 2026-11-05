@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const engineRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const supportedVersion = '4.0.534';
 
-async function checkProjectVersion(entryPoint) {
+export async function checkProjectVersion(entryPoint) {
   let directory = dirname(resolve(entryPoint));
   while (true) {
     try {
