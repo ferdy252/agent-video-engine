@@ -121,6 +121,7 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `revision_restore` | `projectDir`, `expectedRevision`, target `revision` |
 | `source_preview` | `projectDir`, `expectedRevision`, `assetId`, optional `kind`, `sourceStart`, `sourceEnd`, `scale` |
 | `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale` |
+| `color_preview` | `projectDir`, `expectedRevision`, optional output `frame`, `scale` |
 | `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency` |
 | `review_cuts` | `projectDir`, `expectedRevision`; optional preview context, batch offset/limit and timing-only mode |
 | `job_list` | `projectDir` |
@@ -154,6 +155,40 @@ Video maps sample across the recording and near attempted passages. They adapt s
 `media_index_get` and `media_search` support `offset` and `limit` (default 20, maximum 50). `sheetPage` selects a contact sheet independently of the text page. Set `includePreview: false` to read metadata without inline images. `media_search` searches words actually present in the transcript and returns source ranges plus possible alternatives; it does not perform semantic image search. Match `text` and `wordIds` identify matching source entries, while `contextText` provides surrounding speech separately.
 
 Indexes are private derived files under `.engine/indexes/`. Cache identity includes the source content fingerprint, transcript words and timings, asset/project identity, sampling options and algorithm version. Normal timeline edits can reuse the same map. Changed source media or transcript makes an old map stale; build a new index before using it. Missing transcripts are reported explicitly: video receives a visual-only map, while audio receives metadata only. Neither triggers a hidden model download or transcription call. Cancellation removes partial work. No original media is copied into the index.
+
+## Saved color controls
+
+Save a correction on a source image/video with `set_asset_color`. Engine-rendered main clips and media overlays using that asset inherit it. Use `set_clip_color` for a main-clip override. The controls participate in normal edit revisions and undo.
+
+```json
+{
+  "projectDir": "/absolute/path/video-project",
+  "expectedRevision": 3,
+  "operations": [
+    {"type": "set_asset_color", "assetId": "camera", "patch": {"brightness": 1.1, "temperature": -0.2}},
+    {"type": "set_clip_color", "clipId": "take-2", "patch": {"brightness": 1.2}}
+  ]
+}
+```
+
+| Color control | Default | Range or meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Apply the resolved correction; `false` bypasses it |
+| `brightness` | `1` | Display-brightness multiplier, from `0` to `3` |
+| `contrast` | `1` | Contrast multiplier, from `0` to `3` |
+| `saturation` | `1` | Color-intensity multiplier, from `0` to `3`; `0` gives grayscale |
+| `temperature` | `0` | Relative cool/warm adjustment, from `-1` to `1`; positive values warm the image |
+| `tint` | `0` | Relative green/magenta adjustment, from `-1` to `1`; positive values shift toward magenta |
+
+These are relative display controls. Temperature and tint apply modest RGB channel gains, followed by brightness, contrast and saturation. Existing projects resolve to neutral settings. Corrections apply directly to source image/video elements, with the rest of the composition retaining its own colors.
+
+Settings resolve in the order defaults, asset, then clip. A clip field replaces the inherited value. For example, clip brightness `1.2` replaces source brightness `1.1`. Other fields keep inheriting. Set a field to `null` in a patch to remove that local override, or use `patch: null` to clear all local controls. Set clip `enabled: false` to bypass the complete inherited correction. Splitting a clip preserves its overrides.
+
+Stored `asset.color` and `clip.color` objects contain partial controls. `project_inspect` returns them, and its optional compiled timeline contains the fully resolved settings. Audio-only assets reject color controls.
+
+To compare the result, call `color_preview` with the current revision and an output `frame`. Both images use that same frozen edit, frame and scale. `frame` defaults to `0`; `scale` defaults to `0.5` and supports `0.1` to `1`. The before image bypasses saved engine color controls. Read the returned job through `job_get` for `result.before` and `result.after`, each containing a PNG path and render metadata. MCP includes a labeled image for each PNG under 5 MB unless `includePreview: false` is set. Comparison files are stored under the project's ignored `.engine/color-previews/` directory, and cancellation removes incomplete comparisons.
+
+Normal previews and exports use the same corrections. `source_preview` and source-index thumbnails show the source before these saved adjustments. Captions, text overlays and generated custom graphics keep their own colors. Custom-layer code that directly draws its own media URLs controls those elements itself. Engine color controls require the built-in composition or custom `mode: "layer"`; independent compositions with active saved color controls return `UNSUPPORTED_CUSTOM_COLOR` so they can be adapted explicitly. Neutral independent compositions retain their existing behavior.
 
 ## Automatic audio leveling and manual adjustments
 
@@ -238,9 +273,11 @@ Custom motion registered with `mode: "layer"` shares the engine clock and is sup
 | `set_settings` | `patch` with output settings |
 | `set_audio` | `patch` with automatic leveling and output-loudness controls |
 | `set_clip_audio` | `clipId`, `patch` with `leveling` and/or manual `gainDb` |
+| `set_asset_color` | `assetId`, `patch` with source color controls; `null` resets all local controls |
+| `set_clip_color` | `clipId`, `patch` with color overrides; `null` restores full inheritance |
 | `set_custom` | `custom` composition metadata, or `null` to use the built-in composition |
 
-A main clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. `fit` can also be `"contain"`. Optional `position` contains pixel values `{x,y,width,height}`. Optional `audio` contains `leveling` (default `true`) and manual `gainDb` (default `0`). Manual clip gain multiplies the existing `volume` and also works with automatic finishing disabled.
+A main clip has `id`, `assetId`, `sourceStart` and `sourceEnd`. Optional `playbackRate`, `volume` and `fit` default to `1`, `1` and `"cover"`. `fit` can also be `"contain"`. Optional `position` contains pixel values `{x,y,width,height}`. Optional `audio` contains `leveling` (default `true`) and manual `gainDb` (default `0`). Manual clip gain multiplies the existing `volume` and also works with automatic finishing disabled. Optional `color` contains partial source-color overrides.
 
 An overlay has `id`, `type`, `start` and `end`. Its type is `text`, `image`, `video` or `audio`. Text overlays need `text`; other types need an appropriate `assetId`. Timed overlays support optional `sourceStart` and `volume`. The `style` object supports positioning, size, opacity, crop, typography and `fadeInFrames`/`fadeOutFrames`.
 

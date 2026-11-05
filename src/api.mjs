@@ -9,6 +9,7 @@ import {normalizeTranscript} from './transcribe.mjs';
 import {startJob, getJob, cancelJob, retryJob, listJobs} from './jobs.mjs';
 import {importLegacyProject} from './import-legacy.mjs';
 import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
+import {COLOR_LIMITS} from './color-settings.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
@@ -24,9 +25,15 @@ const audioPatch = z.object({
   outputGainDb: audioNumber('outputGainDb').describe('Overall adjustment after automatic target gain. Negative values make the result quieter; peak protection still applies.'),
 }).strict();
 const clipAudioPatch = z.object({leveling: z.boolean().optional(), gainDb: z.number().min(-24).max(24).optional()}).strict();
+const colorNumber = (key) => z.number().min(COLOR_LIMITS[key][0]).max(COLOR_LIMITS[key][1]);
+const colorFields = {enabled: z.boolean(), brightness: colorNumber('brightness'), contrast: colorNumber('contrast'),
+  saturation: colorNumber('saturation'), temperature: colorNumber('temperature'), tint: colorNumber('tint')};
+const colorSettings = z.object(Object.fromEntries(Object.entries(colorFields).map(([key, schema]) => [key, schema.optional()]))).strict();
+const colorPatch = z.object(Object.fromEntries(Object.entries(colorFields).map(([key, schema]) => [key, schema.nullable().optional()]))).strict().nullable();
 const clipSchema = z.object({id: z.string(), assetId: z.string(), sourceStart: z.number().nonnegative(), sourceEnd: z.number().positive(),
   playbackRate: z.number().min(0.01).max(16).optional(), volume: z.number().min(0).max(8).optional(), fit: z.enum(['cover', 'contain']).optional(),
   audio: clipAudioPatch.optional(),
+  color: colorSettings.optional(),
   position: z.object({x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive()}).optional()}).strict();
 const captionPatch = z.object({enabled: z.boolean().optional(), fontSize: z.number().positive().optional(), color: z.string().optional(),
   highlightColor: z.string().optional(), bottom: z.number().nonnegative().optional(), wordsPerPage: z.number().int().min(1).max(50).optional()}).strict();
@@ -53,6 +60,8 @@ const operationSchema = z.discriminatedUnion('type', [
   z.object({type: z.literal('set_captions'), patch: captionPatch}).strict(),
   z.object({type: z.literal('set_audio'), patch: audioPatch}).strict(),
   z.object({type: z.literal('set_clip_audio'), clipId: z.string(), patch: clipAudioPatch}).strict(),
+  z.object({type: z.literal('set_asset_color'), assetId: z.string(), patch: colorPatch}).strict(),
+  z.object({type: z.literal('set_clip_color'), clipId: z.string(), patch: colorPatch}).strict(),
   z.object({type: z.literal('set_settings'), patch: z.object({width: z.number().int().min(2).max(16384).optional(), height: z.number().int().min(2).max(16384).optional(),
     fps: z.number().int().min(1).max(120).optional(), background: z.string().optional()}).strict()}).strict(),
   z.object({type: z.literal('set_custom'), custom: customSchema.nullable()}).strict(),
@@ -118,7 +127,7 @@ export const toolDefinitions = [
     schema: {projectDir, indexId: z.string(), query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
-  {name: 'edit_apply', description: 'Apply an atomic batch of source-linked edits. Operations: set_clips, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words, upsert_overlay, remove_overlay, set_captions, set_settings, set_custom, set_audio, set_clip_audio. set_audio enables/disables automatic voice leveling and sets targetLufs, truePeakDb, strength, maxGainDb, voiceGainDb (voice/music balance) and outputGainDb (overall louder/quieter). set_clip_audio sets leveling:false to exempt a non-speech clip and gainDb for manual take adjustments. Manual clip gains work even with automatic finishing off. Saved settings support revisions and undo. Invalid batches make no change. Originals are never changed.',
+  {name: 'edit_apply', description: 'Apply an atomic batch of source-linked edits. Operations: set_clips, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words, upsert_overlay, remove_overlay, set_captions, set_settings, set_custom, set_audio, set_clip_audio, set_asset_color, set_clip_color. set_asset_color saves color controls for a source image/video, inherited by engine-rendered uses of that asset. set_clip_color overrides a main clip. Controls are enabled, brightness/contrast/saturation multipliers, temperature (warm/cool), and tint (green/magenta). Use a null field to remove that local override, or patch:null to reset all local overrides. A clip with enabled:false bypasses the inherited correction. Use color_preview to compare the same output frame before and after. set_audio enables/disables automatic voice leveling and sets targetLufs, truePeakDb, strength, maxGainDb, voiceGainDb (voice/music balance) and outputGainDb (overall louder/quieter). set_clip_audio sets leveling:false to exempt a non-speech clip and gainDb for manual take adjustments. Manual clip gains work even with automatic finishing off. Saved settings support revisions and undo. Invalid batches make no change. Originals are never changed.',
     schema: {projectDir, expectedRevision, operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: async ({projectDir: dir, ...request}) => {const project = await applyOperations(dir, request); return {revision: project.revision, clips: project.clips, durationInFrames: compileTimeline(project).durationInFrames};}},
   {name: 'revision_list', description: 'List saved edit revisions.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listRevisions(dir)},
@@ -149,7 +158,11 @@ export const toolDefinitions = [
   {name: 'preview_render', description: 'Render a still frame or short moving preview of the current edit. Enabled audio finishing uses the full project mix so short previews retain the same settings and master level as the final export. Returns a durable job ID. Use job_get for the result, audio measurements and any peak-limited target warnings.',
     schema: {projectDir, expectedRevision, kind: z.enum(['still', 'preview']).default('still'), frame: z.number().int().nonnegative().optional(), fromFrame: z.number().int().nonnegative().optional(), toFrame: z.number().int().nonnegative().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args)},
-  {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit. Bypasses audio finishing and manual edit gains so it represents the original recording.',
+  {name: 'color_preview', description: 'Compare saved color corrections at one identical output frame. Returns a durable job ID; read job_get for labeled before and after PNG images. Uses the same saved edit, captions, graphics, frame and scale for both images. The before image bypasses engine color controls. Requires the engine timeline or a custom layer. Creates derived previews without changing the saved edit.',
+    schema: {projectDir, expectedRevision, frame: z.number().int().nonnegative().default(0),
+      scale: z.number().min(.1).max(1).default(.5)}, annotations: edit,
+    run: args => startJob(args.projectDir, {...args, type: 'color_preview'})},
+  {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit. Bypasses saved color controls, audio finishing and manual edit gains so it represents the original recording.',
     schema: {projectDir, expectedRevision, assetId: z.string(), kind: z.enum(['still', 'preview']).default('still'), sourceStart: z.number().nonnegative().default(0), sourceEnd: z.number().positive().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args, true)},
   {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Enabled automatic audio finishing levels main-track voice with saved adjustable controls, includes music/custom-layer audio in the master, and measures the encoded result. Always creates a new output and preserves originals and accepted exports.',
@@ -165,8 +178,8 @@ export const toolDefinitions = [
       if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition owns its timing. Adapt its motion component to custom.mode="layer" so the engine renders the shared main timeline, or review its output directly.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
       return startJob(args.projectDir, {...args, type: 'review_cuts'});
     }},
-  {name: 'job_list', description: 'List saved local render, transcription, cut-review and recording-index jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},
-  {name: 'job_get', description: 'Read job progress, result paths or actionable errors. Completed still previews can be returned as images.',
+  {name: 'job_list', description: 'List saved local render, transcription, color-comparison, cut-review and recording-index jobs.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listJobs(dir)},
+  {name: 'job_get', description: 'Read job progress, result paths or actionable errors. Completed stills and color comparisons can be returned as images.',
     schema: {projectDir, jobId: z.string(), includePreview: z.boolean().optional()}, annotations: ro, run: ({projectDir: dir, jobId}) => getJob(dir, jobId)},
   {name: 'job_cancel', description: 'Request cancellation of a queued or running job and its underlying renderer/transcriber.', schema: {projectDir, jobId: z.string()}, annotations: edit, run: ({projectDir: dir, jobId}) => cancelJob(dir, jobId)},
   {name: 'job_retry', description: 'Restart a failed or interrupted job only if its original project revision is still current.', schema: {projectDir, jobId: z.string()}, annotations: edit, run: ({projectDir: dir, jobId}) => retryJob(dir, jobId)},

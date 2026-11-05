@@ -12,6 +12,7 @@ You describe the result you want. The agent makes editing decisions and uses thi
 - Map possible retakes inside one recording, with timestamps and picture previews.
 - Add captions, text, images, music and sound.
 - Level voice audio automatically, with adjustable volume and per-take controls.
+- Adjust footage brightness, contrast and color, with before-and-after previews.
 - Create custom motion graphics that follow the edit.
 - Keep graphics attached to spoken words as the timing changes.
 - Make still previews and short video previews for review.
@@ -70,6 +71,12 @@ For tool details, advanced graphics and troubleshooting, see the [technical refe
 Ask your agent to enable automatic audio leveling. It can match voice levels across takes and control the finished video's loudness while preserving your original recording.
 
 You can then say "make it quieter," "lower this take," or "turn automatic leveling off." The agent saves those adjustments and creates another preview. Previews use the same complete audio mix as the export, so a short sample is not leveled separately.
+
+## Adjust the picture through chat
+
+Ask your agent to brighten a recording, reduce a yellow cast or adjust its color intensity. A saved correction follows each cut from that recording. You can adjust one clip separately, compare the same frame before and after, or undo the change.
+
+The color controls apply to the footage. Captions and graphics keep their own colors. Use an agent that supports local MCP servers and can access your footage.
 
 ## Licensing
 

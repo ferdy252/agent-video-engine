@@ -73,6 +73,10 @@ try {
   } else if (job.type === 'media_index') {
     const {buildMediaIndex} = await import('./footage-index.mjs');
     result = await buildMediaIndex(job.snapshot, {...job.request, projectDir, signal: controller.signal, onProgress});
+  } else if (job.type === 'color_preview') {
+    const {renderColorComparison} = await import('./color-preview.mjs');
+    result = await renderColorComparison(job.snapshot, {...job.request,
+      outputDir: join(projectDir, '.engine/color-previews', id), signal: controller.signal, onProgress});
   } else if (job.type === 'review_cuts') {
     const {reviewCuts} = await import('./cut-review.mjs');
     result = await reviewCuts(job.snapshot, {...job.request, projectDir,
@@ -86,6 +90,7 @@ try {
       const start = job.request.sourceStart ?? 0;
       const end = job.request.sourceEnd ?? (asset.type === 'image' ? start + 1 : Math.min(asset.duration, start + 5));
       renderSnapshot = {...job.snapshot, audio: undefined, custom: undefined, transcripts: [], overlays: [],
+        assets: job.snapshot.assets.map(({color, ...asset}) => asset),
         settings: {...job.snapshot.settings, width: asset.width || 640, height: asset.height || 360},
         captions: {...job.snapshot.captions, enabled: false}, clips: [{id: 'source-preview', assetId: asset.id,
           sourceStart: start, sourceEnd: end, playbackRate: 1, volume: 1, fit: 'contain'}]};

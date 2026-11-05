@@ -7,6 +7,7 @@ import {validateProject} from './project.mjs';
 import {renderProject} from './render.mjs';
 import {toolEnv} from './media.mjs';
 import {resolveAudioSettings, resolveClipAudio} from './audio-settings.mjs';
+import {colorTransform} from './color-settings.mjs';
 
 const invalid = (message) => { throw Object.assign(new Error(message), {code: 'INVALID_REVIEW_REQUEST'}); };
 const abortError = () => Object.assign(new Error('Cut review cancelled'), {name: 'AbortError', code: 'CANCELLED'});
@@ -37,6 +38,7 @@ export function analyzeCutBoundaries(project) {
     const contiguous = left.assetId === right.assetId && Math.abs(left.sourceEnd - right.sourceStart) < 1e-7 &&
       left.playbackRate === right.playbackRate && left.volume === right.volume && left.fit === right.fit &&
       leftAudio.gainDb === rightAudio.gainDb && (!audio.enabled || leftAudio.leveling === rightAudio.leveling) &&
+      JSON.stringify(colorTransform(left.color)) === JSON.stringify(colorTransform(right.color)) &&
       JSON.stringify(left.position ?? null) === JSON.stringify(right.position ?? null);
     if (contiguous) continue;
     const leftWords = wordBoundary(project, left, left.sourceEnd, 'left');

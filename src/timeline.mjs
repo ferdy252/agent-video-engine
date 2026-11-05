@@ -1,4 +1,5 @@
 import {resolveAudioSettings} from './audio-settings.mjs';
+import {resolveColorSettings} from './color-settings.mjs';
 
 /** Compile one source-linked edit into the common output frame clock. */
 export function compileTimeline(project) {
@@ -16,6 +17,7 @@ export function compileTimeline(project) {
       sourceFrame: Math.round(clip.sourceStart * fps),
       sourceStartSeconds: clip.sourceStart,
       sourceFps: asset?.fps ?? fps,
+      color: resolveColorSettings(asset?.color, clip.color),
     };
   }).filter((clip) => clip.durationInFrames > 0);
   const captions = retimeWords(project, clips);
@@ -32,7 +34,9 @@ export function compileTimeline(project) {
       end = start + overlay.end - overlay.start;
     }
     const from = Math.round(start * fps);
-    return [{...overlay, start, end, from, durationInFrames: Math.round(end * fps) - from}];
+    const asset = assets.get(overlay.assetId);
+    return [{...overlay, start, end, from, durationInFrames: Math.round(end * fps) - from,
+      color: resolveColorSettings(asset?.color)}];
   }).filter((overlay) => overlay.durationInFrames > 0);
   const durationInFrames = overlays.reduce((end, overlay) => Math.max(end, overlay.from + overlay.durationInFrames),
     Math.round(elapsed * fps));

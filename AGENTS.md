@@ -15,6 +15,8 @@ Read `README.md` for the beginner overview and `docs/technical-reference.md` for
 - Treat repeated passages as possible alternatives. Take grouping must never select a best delivery or change the edit automatically.
 - Audio finishing is opt-in and reversible. Preserve manual clip adjustments, share constant gains across nearby source fragments, and never normalize a short preview separately from the complete mix.
 - Preserve floating-point audio headroom through intermediate mixing. Measure encoded output peaks, distinguish requested from achieved loudness, and report silence or insufficient measurements explicitly.
+- Resolve saved source color controls before per-clip overrides. Apply corrections directly to source image/video elements, with captions and generated graphics retaining their own colors.
+- Color comparisons use one frozen revision and the same output frame for both images. Original source previews bypass saved color corrections.
 
 ## Runtime boundaries
 

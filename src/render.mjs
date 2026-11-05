@@ -13,6 +13,7 @@ import {validateProject} from './project.mjs';
 import {assertAssets, run, toolEnv} from './media.mjs';
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {analyzeAudio, finishAudioMaster, prepareVoiceGains} from './audio-processing.mjs';
+import {isColorCorrectionActive} from './color-settings.mjs';
 
 const engineRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const contentTypes = {'.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
@@ -381,6 +382,11 @@ export async function renderProject(project, options = {}) {
   validateProject(project);
   await assertAssets(project);
   let timeline = compileTimeline(project);
+  if (timeline.custom && timeline.custom.mode !== 'layer' &&
+    [...timeline.assets, ...timeline.clips, ...timeline.overlays].some((entry) => isColorCorrectionActive(entry.color))) {
+    throw Object.assign(new Error('Saved color controls require the engine timeline. Use custom.mode="layer" or reset the asset and clip color controls for a standalone composition.'),
+      {code: 'UNSUPPORTED_CUSTOM_COLOR'});
+  }
   const audioSettings = resolveAudioSettings(project.audio);
   if (kind !== 'still' && audioSettings.enabled && timeline.custom && timeline.custom.mode !== 'layer') {
     throw audioFailure('Audio finishing needs the engine timeline. Use custom.mode:"layer" or disable audio.enabled for a standalone custom composition.',

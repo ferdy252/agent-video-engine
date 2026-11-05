@@ -1,4 +1,5 @@
-import React, {createContext, useContext, useMemo} from 'react';
+import React, {createContext, useContext, useId, useMemo} from 'react';
+import {colorTransform} from './color-settings.mjs';
 import {
   AbsoluteFill, Audio, Composition, Img, OffthreadVideo, Sequence,
   useCurrentFrame,
@@ -44,32 +45,57 @@ function overlayStyle(style: Record<string, any> = {}, frame: number, duration: 
   return result;
 }
 
+function useMediaColor(settings: any) {
+  const id = `source-color-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const {filter, rgbGains} = colorTransform(settings);
+  const hasRgb = rgbGains.some((gain: number) => gain !== 1);
+  return {id, rgbGains, hasRgb,
+    filter: [hasRgb ? `url("#${id}")` : '', filter].filter(Boolean).join(' ') || undefined};
+}
+
+function MediaColorDefinition({color}: {color: ReturnType<typeof useMediaColor>}) {
+  if (!color.hasRgb) return null;
+  return <svg width={0} height={0} aria-hidden="true" focusable="false"
+    style={{position: 'absolute', pointerEvents: 'none'}}>
+    <defs><filter id={color.id} colorInterpolationFilters="sRGB">
+      <feComponentTransfer>
+        <feFuncR type="linear" slope={color.rgbGains[0]}/>
+        <feFuncG type="linear" slope={color.rgbGains[1]}/>
+        <feFuncB type="linear" slope={color.rgbGains[2]}/>
+      </feComponentTransfer>
+    </filter></defs>
+  </svg>;
+}
+
 function Clip({clip, timeline}: {clip: any; timeline: Timeline}) {
   const asset = getAsset(timeline, clip.assetId);
+  const color = useMediaColor(clip.color);
   const volume = clip.volume ?? 1;
   const style: React.CSSProperties = {...mediaStyle, objectFit: clip.fit ?? 'contain',
     ...(clip.position ? {position: 'absolute', left: clip.position.x, top: clip.position.y,
-      width: clip.position.width, height: clip.position.height} : {})};
-  if (asset.type === 'image') return <Img src={asset.src} style={style}/>;
+      width: clip.position.width, height: clip.position.height} : {}), filter: color.filter};
+  if (asset.type === 'image') return <><MediaColorDefinition color={color}/><Img src={asset.src} style={style}/></>;
   if (asset.type === 'audio') return <Audio src={asset.src} trimBefore={clip.sourceFrame}
     playbackRate={clip.playbackRate ?? 1} volume={volume}/>;
-  return <OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
+  return <><MediaColorDefinition color={color}/><OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
     playbackRate={clip.playbackRate ?? 1} volume={volume}
     muted={volume === 0 || asset.hasAudio === false}
-    style={style}/>;
+    style={style}/></>;
 }
 
 function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
   const frame = useCurrentFrame();
+  const color = useMediaColor(overlay.color);
   const style = overlayStyle(overlay.style, frame, overlay.durationInFrames);
   if (overlay.type === 'text') return <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'white', fontSize: 56, fontFamily: 'Arial, sans-serif', whiteSpace: 'pre-wrap', ...style}}>{overlay.text}</div>;
   const asset = getAsset(timeline, overlay.assetId);
   const trimBefore = Math.round((overlay.sourceStart ?? 0) * timeline.fps);
   if (overlay.type === 'audio') return <Audio src={asset.src} trimBefore={trimBefore} volume={overlay.volume ?? 1}/>;
-  if (overlay.type === 'image') return <Img src={asset.src} style={{objectFit: 'contain', ...style}}/>;
-  return <OffthreadVideo src={asset.src} trimBefore={trimBefore} volume={overlay.volume ?? 1}
-    muted={overlay.volume === 0 || asset.hasAudio === false} style={{objectFit: 'contain', ...style}}/>;
+  const mediaStyle = {objectFit: 'contain' as const, ...style, filter: color.filter};
+  if (overlay.type === 'image') return <><MediaColorDefinition color={color}/><Img src={asset.src} style={mediaStyle}/></>;
+  return <><MediaColorDefinition color={color}/><OffthreadVideo src={asset.src} trimBefore={trimBefore} volume={overlay.volume ?? 1}
+    muted={overlay.volume === 0 || asset.hasAudio === false} style={mediaStyle}/></>;
 }
 
 function CaptionPages({timeline}: {timeline: Timeline}) {

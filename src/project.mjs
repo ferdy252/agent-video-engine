@@ -3,6 +3,7 @@ import {statSync} from 'node:fs';
 import {mkdir, open, readFile, rename, unlink, readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateClipAudio} from './audio-settings.mjs';
+import {applyColorPatch, validateColorSettings} from './color-settings.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
 
@@ -90,6 +91,10 @@ export function validateProject(project) {
     for (const key of ['width', 'height']) if (asset[key] !== undefined) number(asset[key], `asset.${key}`, {min: 1, integer: true});
     if (asset.fps !== undefined) number(asset.fps, 'asset.fps', {min: Number.EPSILON});
     if (asset.hasAudio !== undefined && typeof asset.hasAudio !== 'boolean') fail('asset.hasAudio must be boolean.');
+    if (asset.color !== undefined) {
+      if (asset.type === 'audio') fail('Color controls require an image or video asset.');
+      validateColorSettings(asset.color);
+    }
     assets.set(asset.id, asset);
   }
   const transcriptAssets = new Set();
@@ -118,6 +123,10 @@ export function validateProject(project) {
     number(clip.playbackRate, 'clip.playbackRate', {min: 0.01, max: 16});
     number(clip.volume, 'clip.volume', {min: 0, max: 8});
     if (clip.audio !== undefined) validateClipAudio(clip.audio);
+    if (clip.color !== undefined) {
+      if (asset.type === 'audio') fail('Color controls require an image or video clip.');
+      validateColorSettings(clip.color);
+    }
     if (!['cover', 'contain'].includes(clip.fit)) fail('clip.fit must be cover or contain.');
     if (clip.position !== undefined) {
       object(clip.position, 'clip.position');
@@ -379,6 +388,24 @@ function applyOperation(project, operation) {
       validateClipAudio(operation.patch);
       const clip = project.clips[findClip(project, operation.clipId)];
       clip.audio = {...resolveClipAudio(clip.audio), ...clone(operation.patch)};
+      break;
+    }
+    case 'set_asset_color': {
+      const asset = project.assets.find((entry) => entry.id === operation.assetId);
+      if (!asset) fail(`Unknown asset: ${operation.assetId}.`, 'ASSET_NOT_FOUND');
+      if (asset.type === 'audio') fail('Color controls require an image or video asset.');
+      const color = applyColorPatch(asset.color, operation.patch);
+      if (color === undefined) delete asset.color;
+      else asset.color = color;
+      break;
+    }
+    case 'set_clip_color': {
+      const clip = project.clips[findClip(project, operation.clipId)];
+      const asset = project.assets.find((entry) => entry.id === clip.assetId);
+      if (asset.type === 'audio') fail('Color controls require an image or video clip.');
+      const color = applyColorPatch(clip.color, operation.patch);
+      if (color === undefined) delete clip.color;
+      else clip.color = color;
       break;
     }
     case 'set_custom': if (operation.custom === null) delete project.custom; else project.custom = clone(operation.custom); break;
