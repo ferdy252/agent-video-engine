@@ -11,6 +11,7 @@ import {makeCancelSignal, openBrowser, renderMedia, renderStill, selectCompositi
 import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
 import {assertAssets, run, toolEnv} from './media.mjs';
+import {buildExportQuality} from './export-quality.mjs';
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {analyzeAudio, finishAudioMaster, prepareVoiceGains} from './audio-processing.mjs';
 import {needsStemMix, mixAudioStems} from './audio-mixer.mjs';
@@ -403,6 +404,10 @@ export async function renderProject(project, options = {}) {
   if (!Number.isFinite(scale) || scale <= 0 || scale > 2) throw new Error('scale must be greater than zero and at most 2');
   const concurrency = options.concurrency ?? 1;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error('concurrency must be an integer from 1 to 8');
+  const minShortSide = options.minShortSide ?? 1080;
+  if (!Number.isInteger(minShortSide) || minShortSide < 2 || minShortSide > 8192) {
+    throw new Error('minShortSide must be an integer from 2 to 8192');
+  }
   checkAbort(signal);
   validateProject(project);
   await assertAssets(project);
@@ -443,6 +448,8 @@ export async function renderProject(project, options = {}) {
   try {
     checkAbort(signal);
     const output = await targetPath(resolve(options.outputPath), server.sourcePaths);
+    const qualityReportPath = kind === 'still' ? null
+      : await targetPath(`${output}.quality.json`, server.sourcePaths);
     work = await mkdtemp(join(dirname(output), '.agent-video-render-'));
     const partial = join(work, `render${extension}`);
     let audio;
@@ -518,16 +525,35 @@ export async function renderProject(project, options = {}) {
     report(onProgress, {stage: 'verify', progress: 0});
     const verification = await verifyOutput(partial, {kind, dimensions,
       frames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1, fps: composition.fps, signal});
+    const quality = kind === 'still' ? null : await buildExportQuality({filePath: partial, project,
+      kind, sourcePreview: options.sourcePreview === true, composition, dimensions, frameRange,
+      scale, minShortSide, signal});
+    const reportFile = join(work, 'quality.json');
+    if (quality) await writeFile(reportFile, `${JSON.stringify(quality, null, 2)}\n`, {flag: 'wx'});
     checkAbort(signal);
     // Catch original media replaced while a long render was in progress, too.
     await assertAssets(project);
+    checkAbort(signal);
     // Hard-link in the destination directory is atomic and refuses to overwrite
     // a file created after the initial existence check.
-    await link(partial, output);
+    if (quality) await link(reportFile, qualityReportPath);
+    try {
+      checkAbort(signal);
+      await link(partial, output);
+    } catch (error) {
+      if (quality) {
+        // Remove only our own report link if a competing export claimed the MP4.
+        const own = await lstat(reportFile);
+        const published = await lstat(qualityReportPath).catch(() => null);
+        if (published?.ino === own.ino && published.dev === own.dev) await rm(qualityReportPath);
+      }
+      throw error;
+    }
     report(onProgress, {stage: 'complete', progress: 1});
     return {outputPath: output, kind, revision: project.revision, bytes: info.size,
       compositionId, ...(custom ? {customMode} : {}), durationInFrames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1,
       fps: composition.fps, ...dimensions, verification, ...(audio ? {audio} : {}),
+      ...(quality ? {quality, qualityReportPath} : {}),
       ...(frame === undefined ? {frameRange} : {frame})};
   } catch (error) {
     if (signal?.aborted) throw abortError();

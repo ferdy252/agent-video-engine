@@ -125,6 +125,13 @@ test('real MCP stages, reviews, delivers and transfers one complete source-linke
       const movie = await completed('export_render', {expectedRevision: 3, preset: 'vertical', outputPath: join(directory, 'vertical.mp4')});
       assert.deepEqual([movie.width, movie.height, movie.fps, movie.durationInFrames], [1080, 1920, 10, 30]);
       assert.equal(movie.verification.audio, true);
+      assert.equal(movie.quality.purpose, 'final');
+      assert.equal(movie.quality.status, 'passed');
+      assert.equal(movie.quality.encoding.requested.crf, 18);
+      assert.equal(movie.qualityReportPath, `${movie.outputPath}.quality.json`);
+      const checkedFinal = await call('export_verify', {outputPath: movie.outputPath});
+      assert.equal(checkedFinal.verification.verifiedFinal, true);
+      assert.equal(checkedFinal.status, 'passed');
       assert.equal(movie.audio.peakSafety.passed, true);
       assert.equal(movie.audio.mix.denoise.enabled, true);
       assert.equal(movie.audio.mix.ducking.target, 'music');

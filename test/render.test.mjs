@@ -4,6 +4,7 @@ import {mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile} fro
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {execFile} from 'node:child_process';
+import {writeFileSync} from 'node:fs';
 import {promisify} from 'node:util';
 import {createProject} from '../src/project.mjs';
 import {renderProject, startAssetServer} from '../src/render.mjs';
@@ -77,6 +78,11 @@ test('existing outputs and original source assets cannot be replaced', async (t)
     clips: [{id: 'c', assetId: 'a', sourceStart: 0, sourceEnd: 1}]});
   await assert.rejects(renderProject(project, {outputPath: source}), /source asset/);
   await assert.rejects(renderProject(project, {outputPath: existing}), /already exists/);
+  const claimedReportOutput = path.join(directory, 'claimed-report.mp4');
+  await writeFile(`${claimedReportOutput}.quality.json`, 'existing report');
+  await assert.rejects(renderProject(project, {outputPath: claimedReportOutput}), /already exists/);
+  assert.equal(await readFile(`${claimedReportOutput}.quality.json`, 'utf8'), 'existing report');
+  await assert.rejects(readFile(claimedReportOutput), {code: 'ENOENT'});
   assert.equal(await readFile(source, 'utf8'), 'original');
   assert.equal(await readFile(existing, 'utf8'), 'accepted');
   assert.ok(!(await readdir(directory)).some((name) => name.startsWith('.agent-video-render-')));
@@ -117,6 +123,12 @@ test('headless synthetic smoke renders source trim, caption, overlay and audio',
     const video = await renderProject(project, {kind: 'preview', scale: 1, fromFrame: 0, toFrame: 9,
       outputPath: path.join(directory, 'preview.mp4')});
     assert.equal(video.durationInFrames, 10);
+    assert.equal(video.quality.purpose, 'preview');
+    assert.equal(video.quality.status, 'not_final');
+    assert.equal(video.quality.encoding.requested.crf, 25);
+    const report = JSON.parse(await readFile(video.qualityReportPath, 'utf8'));
+    assert.equal(report.fingerprint.bytes, video.bytes);
+    assert.equal(report.status, 'not_final');
     const {stdout} = await exec('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', video.outputPath]);
     const probe = JSON.parse(stdout);
     const picture = probe.streams.find((stream) => stream.codec_type === 'video');
@@ -127,6 +139,13 @@ test('headless synthetic smoke renders source trim, caption, overlay and audio',
     assert.ok(Math.abs(Number(probe.format.duration) - .5) < .05);
     await exec('ffmpeg', ['-v', 'error', '-i', video.outputPath, '-f', 'null', '-']);
     assert.ok(!(await readdir(directory)).some((name) => name.startsWith('.agent-video-render-')));
+    const competed = path.join(directory, 'competing-export.mp4');
+    await assert.rejects(renderProject(project, {kind: 'preview', scale: 1, fromFrame: 0, toFrame: 2,
+      outputPath: competed, onProgress: ({stage}) => {
+        if (stage === 'verify') writeFileSync(competed, 'accepted competing export', {flag: 'wx'});
+      }}), {code: 'EEXIST'});
+    assert.equal(await readFile(competed, 'utf8'), 'accepted competing export');
+    await assert.rejects(readFile(`${competed}.quality.json`), {code: 'ENOENT'});
   });
 
 test('custom Remotion motion renders headlessly and in-flight cancellation leaves no export',
@@ -165,6 +184,7 @@ registerRoot(() => <Composition id="CustomMotion" component={Motion} width={160}
     {name: 'AbortError'});
     const files = await readdir(directory);
     assert.ok(!files.includes('cancelled.mp4'));
+    assert.ok(!files.includes('cancelled.mp4.quality.json'));
     assert.ok(!files.some((name) => name.startsWith('.agent-video-render-')));
   });
 

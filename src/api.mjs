@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {readFile, mkdir} from 'node:fs/promises';
-import {resolve, join} from 'node:path';
+import {resolve, join, isAbsolute} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createProject, loadProject, applyOperations, restoreRevision, listRevisions, validateProject, readProjectRevision} from './project.mjs';
 import {stageDraft, inspectDraft, listDrafts, applyDraft, deleteDraft, compareProjectSnapshots} from './drafts.mjs';
@@ -12,6 +12,7 @@ import {startJob, startBundleOpen, getJob, cancelJob, retryJob, listJobs} from '
 import {importLegacyProject} from './import-legacy.mjs';
 import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
 import {COLOR_LIMITS} from './color-settings.mjs';
+import {verifyExportQuality} from './export-quality.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
@@ -107,7 +108,7 @@ async function renderJob(args, sourcePreview = false) {
   await assertAssets(project);
   const kind = args.kind || 'video';
   const outputPath = args.outputPath ? resolve(args.projectDir, args.outputPath) : join(resolve(args.projectDir), 'exports',
-    `r${project.revision}-${sourcePreview ? 'source' : kind}-${Date.now()}-${randomUUID().slice(0, 8)}.${kind === 'still' ? 'png' : 'mp4'}`);
+    `r${project.revision}-${sourcePreview ? 'source-preview' : kind === 'video' ? 'final' : kind}-${Date.now()}-${randomUUID().slice(0, 8)}.${kind === 'still' ? 'png' : 'mp4'}`);
   return startJob(args.projectDir, {...args, outputPath, type: 'render', ...(sourcePreview ? {sourcePreview: true} : {})});
 }
 export const toolDefinitions = [
@@ -223,9 +224,12 @@ export const toolDefinitions = [
   {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit. Bypasses saved color controls, audio finishing and manual edit gains so it represents the original recording.',
     schema: {projectDir, expectedRevision, assetId: z.string(), kind: z.enum(['still', 'preview']).default('still'), sourceStart: z.number().nonnegative().default(0), sourceEnd: z.number().positive().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args, true)},
-  {name: 'export_render', description: 'Render one final MP4 from the saved project, including captions, overlays and audio. Enabled automatic audio finishing levels main-track voice with saved adjustable controls, includes music/custom-layer audio in the master, and measures the encoded result. Always creates a new output and preserves originals and accepted exports.',
-    schema: {projectDir, expectedRevision, outputPath: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(), fit: z.enum(['contain', 'cover']).optional(), concurrency: z.number().int().min(1).max(8).optional()}, annotations: edit,
+  {name: 'export_render', description: 'Render one final MP4 with captions, overlays and the complete mix. Returns a job; inspect its quality report and warnings before delivery. Writes an adjacent .quality.json report with the exact file fingerprint, intended and measured settings. Finals use H.264 CRF 18; default minimum short side is 1080 pixels. A smaller intentional delivery can set minShortSide explicitly. Warnings do not silently resize the edit or establish visual approval. Creates new files and preserves originals.',
+    schema: {projectDir, expectedRevision, outputPath: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(), fit: z.enum(['contain', 'cover']).optional(), concurrency: z.number().int().min(1).max(8).optional(), minShortSide: z.number().int().min(2).max(8192).default(1080).describe('Minimum final short edge in pixels. Lower only for an intentional smaller delivery; does not resize the video.')}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
+  {name: 'export_verify', description: 'Read-only check of the exact local video before delivery or upload. Recompute its fingerprint and encoded metadata against the adjacent .quality.json report. Preview files, missing or inconsistent reports and quality warnings cannot pass as a verified final. A technical pass does not establish visual sharpness or platform playback quality. Copy the report beside the video when moving it.',
+    schema: {outputPath: z.string().min(1).refine(isAbsolute, 'outputPath must be absolute')}, annotations: ro,
+    run: args => verifyExportQuality(args.outputPath)},
   {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Supports the built-in timeline and custom layer mode, where the engine owns timing and main clips. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Independent standalone compositions require adaptation to layer mode.',
     schema: {projectDir, expectedRevision, contextSeconds: z.number().min(0.25).max(3).default(1),
       offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20),

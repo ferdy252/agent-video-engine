@@ -14,6 +14,18 @@ A preset changes the canvas for the requested render. Use the same `preset` in `
 
 Explicit clip rectangles, numeric overlay geometry and horizontal or vertical motion distances scale with the canvas. Percentage and CSS expressions keep their authored values. Preview each new shape to check framing and any custom layer that uses fixed pixel positions.
 
+## Final-export quality
+
+`export_render` renders at full scale with H.264, `yuv420p` and CRF 18. Moving previews use CRF 25 and normally half scale. The encoder uses quality-based compression, so the measured bitrate varies with the picture; bitrate alone is not a visual-quality verdict. See the [Remotion encoding guide](https://www.remotion.dev/docs/encoding/).
+
+Every rendered MP4 has an adjacent `<filename>.mp4.quality.json` report. The completed job returns `quality` and `qualityReportPath`. The report records the render purpose, project revision, exact file SHA-256 and byte count, intended settings, measured media properties and warnings. Requested encoder controls are labeled separately from measured properties. Finals warn below a 1080-pixel short edge by default. Set `minShortSide` explicitly for an intentional smaller delivery; this changes the check, not the rendered dimensions. Use a delivery preset or project settings to change the canvas and review the new framing.
+
+Before delivery or upload, call `export_verify` with an absolute `outputPath`. It rereads the matching sidecar, recomputes the video fingerprint and probes the encoded file. `passed` means the recorded technical checks passed for these exact bytes. `needs_review` includes missing or inconsistent reports and final-resolution warnings. `not_final` identifies a preview or source preview. An absent report on an older export requires an explicit manual review; the tool does not invent provenance or re-encode the file.
+
+Copy the report alongside the MP4, retaining the naming relationship, and verify the destination file again. Never promote a preview by renaming it. Reports are local consistency evidence, not signed proof of origin or creative approval. Successful checks do not assess readable text, crop enlargement, source softness, compression artifacts or a platform's later processing. Compare representative details with the original and review the actual output at its intended viewing size. Upscaling cannot restore missing source detail.
+
+Video and report outputs refuse overwrite, including a pre-existing report. Failed publication of the video removes only the report created by that attempt. Quality warnings preserve the output for review rather than silently changing it.
+
 ## Subtitle files
 
 Call `export_subtitles` with `format` of `srt` or `vtt` and the matching filename extension. `outputPath` can be absolute or relative to the project. The sidecar uses the same compiled cue boundaries as the edit and stops at the end of the video. Explicit output cues take precedence over pages grouped from the retimed source transcript. Both formats preserve multiline text and write times to the nearest millisecond. WebVTT escapes literal text markup. You can export a sidecar with burned-in captions turned off.

@@ -132,7 +132,8 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `source_preview` | `projectDir`, `expectedRevision`, `assetId`, optional `kind`, `sourceStart`, `sourceEnd`, `scale` |
 | `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale`, `draftId` or `revision`, delivery `preset` and `fit` |
 | `color_preview` | `projectDir`, `expectedRevision`, optional output `frame`, `scale` |
-| `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency`, delivery `preset` and `fit` |
+| `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency`, delivery `preset`, `fit` and `minShortSide` (1080 by default) |
+| `export_verify` | Absolute `outputPath`; read-only fingerprint, metadata and quality-report check of the exact delivery file |
 | `export_subtitles` | `projectDir`, `expectedRevision`, `outputPath`, `format` of `srt` or `vtt` |
 | `export_timeline` | `projectDir`, `expectedRevision`, `outputPath`, optional `format` of `otio` |
 | `review_cuts` | `projectDir`, `expectedRevision`; optional preview context, batch offset/limit and timing-only mode |

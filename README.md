@@ -73,6 +73,8 @@ Ask your agent to brighten a recording, keep a person in frame, or slowly zoom i
 
 Ask for an MP4 in the shape you need, an SRT or VTT subtitle file, or an editable OpenTimelineIO file. The timeline handoff carries media and cuts. Bring the finished MP4 to show the intended graphics, color and mix. [Delivery guide](docs/delivery.md)
 
+Each moving preview and final MP4 gets a small quality report beside it. Before delivery, the agent can check the exact file against that report. The editor flags previews, changed files and finals below the selected resolution target. It keeps the original footage and does not silently resize a finished edit. These checks help prevent the wrong file being uploaded; you still need to review sharpness, cropping and playback.
+
 Use a project bundle to move the editable engine project and its media to another machine. A bundle includes saved transcripts, custom settings and registered media. Review its contents before sharing. Your agent can also reconnect a moved file after verifying that its contents match the original. [Technical reference](docs/technical-reference.md)
 
 ## Licensing

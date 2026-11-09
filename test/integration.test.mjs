@@ -120,6 +120,11 @@ test('real MCP: import, source preview, edit, caption, export, undo and queue ca
     assert.equal(exported.status, 'completed', JSON.stringify(exported.error));
     assert.equal(exported.result.verification.frames, 20);
     assert.equal(exported.result.verification.audio, true);
+    assert.equal(exported.result.quality.purpose, 'final');
+    assert.equal(exported.result.quality.status, 'needs_review', 'A small final must carry a delivery warning');
+    const checkedFinal = await call('export_verify', {outputPath: exported.result.outputPath});
+    assert.equal(checkedFinal.verification.verifiedFinal, false);
+    assert.equal(checkedFinal.status, 'needs_review');
     assert.equal(await fileFingerprint(source), originalHash);
     const restored = await call('revision_restore', {projectDir, expectedRevision: 3, revision: 2});
     assert.equal(restored.revision, 4);
