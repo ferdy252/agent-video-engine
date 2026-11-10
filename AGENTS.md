@@ -34,4 +34,10 @@ Successful rendering and numerical checks do not establish editorial quality or 
 
 ## Repository hygiene
 
+When adding or changing a public tool or edit operation, update its schema,
+description and usage reference together. If maintained editing skills are part
+of the task context, align their when-to-use guidance and verify discovery as
+part of the same change. Keep those companion skills outside this standalone
+repository; do not introduce a dependency on a user's private skill installation.
+
 Keep code, tests, lockfiles and required attribution in version control. Keep footage, editable user projects, exports, models, caches, jobs, local client configuration, environment files, tokens and backups out. Inspect staged files before publication. Use generic paths and examples in public documentation.
