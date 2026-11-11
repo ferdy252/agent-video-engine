@@ -51,6 +51,13 @@ export async function fileFingerprint(path) {
   return `sha256:${hash.digest('hex')}`;
 }
 
+export function videoGeometry(video) {
+  const rotation = Number(video?.side_data_list?.find(entry => entry.rotation !== undefined)?.rotation ?? video?.tags?.rotate ?? 0);
+  const [sarWidth, sarHeight] = String(video?.sample_aspect_ratio ?? '1:1').split(':').map(Number);
+  return {width: video.width, height: video.height, rotation: Number.isFinite(rotation) ? rotation : 0,
+    sampleAspectRatio: sarWidth > 0 && sarHeight > 0 ? sarWidth / sarHeight : 1};
+}
+
 export async function probeAsset(path, id = randomUUID()) {
   const absolute = await realpath(resolve(path));
   const {stdout} = await run('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', absolute]);
@@ -64,7 +71,7 @@ export async function probeAsset(path, id = randomUUID()) {
   const fps = fraction[1] ? fraction[0] / fraction[1] : fraction[0];
   return {id, path: absolute, type: image ? 'image' : video ? 'video' : 'audio',
     duration: Number.isFinite(duration) ? duration : 0,
-    ...(video ? {width: video.width, height: video.height, fps: Number.isFinite(fps) && fps > 0 ? fps : 30} : {}),
+    ...(video ? {...videoGeometry(video), fps: Number.isFinite(fps) && fps > 0 ? fps : 30} : {}),
     hasAudio: Boolean(audio), fingerprint: await fileFingerprint(absolute)};
 }
 

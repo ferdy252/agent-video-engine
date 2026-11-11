@@ -527,7 +527,8 @@ export async function renderProject(project, options = {}) {
       frames: kind === 'still' ? 1 : frameRange[1] - frameRange[0] + 1, fps: composition.fps, signal});
     const quality = kind === 'still' ? null : await buildExportQuality({filePath: partial, project,
       kind, sourcePreview: options.sourcePreview === true, composition, dimensions, frameRange,
-      scale, minShortSide, signal});
+      scale, minShortSide, maxUpscale: options.maxUpscale, speechGapMinSeconds: options.speechGapMinSeconds,
+      speechGapNoiseDb: options.speechGapNoiseDb, signal, onProgress});
     const reportFile = join(work, 'quality.json');
     if (quality) await writeFile(reportFile, `${JSON.stringify(quality, null, 2)}\n`, {flag: 'wx'});
     checkAbort(signal);

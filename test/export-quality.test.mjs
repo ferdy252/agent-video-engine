@@ -16,8 +16,9 @@ const project = {
     {id: 'image', type: 'image', path: '/private/source/graphic.png'},
     {id: 'unused', type: 'video', path: '/private/source/other.mp4', width: 320, height: 180},
   ],
-  clips: [{assetId: 'main'}, {assetId: 'main'}],
-  overlays: [{assetId: 'image'}],
+  clips: [{id: 'a', assetId: 'main', sourceStart: 0, sourceEnd: .2}, {id: 'b', assetId: 'main', sourceStart: .2, sourceEnd: .4}],
+  overlays: [{id: 'unused-zero-length', type: 'image', assetId: 'image', start: 0, end: 0}],
+  transcripts: [], captions: {enabled: false},
 };
 
 async function fixture(t, {size = '160x90', codec = 'libx264', pixelFormat = 'yuv420p',
@@ -34,8 +35,10 @@ async function fixture(t, {size = '160x90', codec = 'libx264', pixelFormat = 'yu
 }
 
 function build(filePath, options = {}) {
-  return buildExportQuality({filePath, project, kind: 'video', composition, dimensions,
-    frameRange: [0, 3], scale: 1, ...options});
+  const snapshot = structuredClone(options.project ?? project);
+  snapshot.assets[0].path = filePath;
+  return buildExportQuality({filePath, kind: 'video', composition, dimensions,
+    frameRange: [0, 3], scale: 1, ...options, project: snapshot});
 }
 
 function save(filePath, report) {
@@ -155,4 +158,21 @@ test('wrong output format or dimensions and scaled or partial final settings req
     project: {...project, settings: {...settings, fps: 24}},
     composition: {width: 320, height: 180, fps: 10, durationInFrames: 8}});
   assert.deepEqual(warningCodes(altered), ['TARGET_DIMENSIONS_MISMATCH', 'TARGET_FPS_MISMATCH', 'SCALED_FINAL', 'PARTIAL_FINAL']);
+});
+
+test('older sidecars remain readable but do not imply new framing or speech checks ran', async t => {
+  const path = await fixture(t);
+  const {checks, ...legacy} = await build(path, {minShortSide: 90});
+  legacy.schemaVersion = 1;
+  legacy.limitations = [
+    'These checks verify technical export properties. Watch the video at delivery size to judge visual quality.',
+    'Visual softness, detail lost to cropping or upscaling, and quality after platform transcoding require visual review.',
+    'Source dimensions summarize engine timeline references. Shot visibility, framing and custom-layer media can differ.',
+    'The encoder settings are requested values. Bitrate is measured for context and does not determine pass or fail.',
+  ];
+  await save(path, legacy);
+  const result = await verifyExportQuality(path);
+  assert.equal(result.verification.report, 'matched');
+  assert.equal(result.verification.verifiedFinal, false);
+  assert.ok(warningCodes(result).includes('EXPORT_REVIEW_CHECKS_MISSING'));
 });

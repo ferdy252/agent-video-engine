@@ -14,6 +14,8 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 - Edit caption wording, line breaks and timing. Add reusable titles, name labels and callouts, or attach graphics to spoken words.
 - Export vertical, wide or square video, subtitle files and an editable timeline for compatible editors.
 - Move a project with its source media or reconnect a recording that moved.
+- Flag crops and zooms that enlarge footage too much, with timestamps for review.
+- Scan the whole exported video's audio for possible speech gaps and report the moments to listen to before sharing.
 
 These checks help find places to review. You still need to watch and listen to the finished video.
 
@@ -73,7 +75,9 @@ Ask your agent to brighten a recording, keep a person in frame, or slowly zoom i
 
 Ask for an MP4 in the shape you need, an SRT or VTT subtitle file, or an editable OpenTimelineIO file. The timeline handoff carries media and cuts. Bring the finished MP4 to show the intended graphics, color and mix. [Delivery guide](docs/delivery.md)
 
-Each moving preview and final MP4 gets a small quality report beside it. Before delivery, the agent can check the exact file against that report. The editor flags previews, changed files and finals below the selected resolution target. It keeps the original footage and does not silently resize a finished edit. These checks help prevent the wrong file being uploaded; you still need to review sharpness, cropping and playback.
+Each moving preview and final MP4 gets a quality report beside it. Before delivery, the agent can check the exact file against that report. The editor flags previews, changed files and finals below the selected resolution target.
+
+Final exports also check crop and zoom enlargement and scan the full audio for possible speech gaps. The report gives timestamps to review before sharing. When source word timings are available, they help find pauses even when music covers the silence. These are review cues: a pause may be intentional, and music or noise can hide missing speech. The editor keeps your cuts intact. Your agent can adjust unwanted gaps or framing and export again. It can also check enlargement before rendering with `quality_preflight`.
 
 Use a project bundle to move the editable engine project and its media to another machine. A bundle includes saved transcripts, custom settings and registered media. Review its contents before sharing. Your agent can also reconnect a moved file after verifying that its contents match the original. [Technical reference](docs/technical-reference.md)
 

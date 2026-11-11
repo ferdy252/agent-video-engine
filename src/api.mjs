@@ -3,7 +3,7 @@ import {readFile, mkdir} from 'node:fs/promises';
 import {resolve, join, isAbsolute} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createProject, loadProject, applyOperations, restoreRevision, listRevisions, validateProject, readProjectRevision} from './project.mjs';
-import {stageDraft, inspectDraft, listDrafts, applyDraft, deleteDraft, compareProjectSnapshots} from './drafts.mjs';
+import {stageDraft, inspectDraft, listDrafts, applyDraft, deleteDraft, compareProjectSnapshots, getDraft} from './drafts.mjs';
 import {GRAPHIC_PRESETS, MOTION_LIMITS} from './edit-controls.mjs';
 import {compileTimeline} from './timeline.mjs';
 import {probeAsset, doctor, assertAssets} from './media.mjs';
@@ -13,6 +13,8 @@ import {importLegacyProject} from './import-legacy.mjs';
 import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
 import {COLOR_LIMITS} from './color-settings.mjs';
 import {verifyExportQuality} from './export-quality.mjs';
+import {inspectFraming} from './framing-quality.mjs';
+import {applyDeliveryPreset} from './delivery.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
@@ -224,10 +226,30 @@ export const toolDefinitions = [
   {name: 'source_preview', description: 'Inspect an original source asset before making editorial decisions. Renders a still or short source clip without changing the saved edit. Bypasses saved color controls, audio finishing and manual edit gains so it represents the original recording.',
     schema: {projectDir, expectedRevision, assetId: z.string(), kind: z.enum(['still', 'preview']).default('still'), sourceStart: z.number().nonnegative().default(0), sourceEnd: z.number().positive().optional(), scale: z.number().min(0.1).max(1).default(0.5)}, annotations: edit,
     run: args => renderJob(args, true)},
-  {name: 'export_render', description: 'Render one final MP4 with captions, overlays and the complete mix. Returns a job; inspect its quality report and warnings before delivery. Writes an adjacent .quality.json report with the exact file fingerprint, intended and measured settings. Finals use H.264 CRF 18; default minimum short side is 1080 pixels. A smaller intentional delivery can set minShortSide explicitly. Warnings do not silently resize the edit or establish visual approval. Creates new files and preserves originals.',
-    schema: {projectDir, expectedRevision, outputPath: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(), fit: z.enum(['contain', 'cover']).optional(), concurrency: z.number().int().min(1).max(8).optional(), minShortSide: z.number().int().min(2).max(8192).default(1080).describe('Minimum final short edge in pixels. Lower only for an intentional smaller delivery; does not resize the video.')}, annotations: edit,
+  {name: 'quality_preflight', description: 'Check source resolution, crop, fit and animated zoom BEFORE rendering. Returns timestamped enlargement warnings and full-size preview hints without editing. Checks the saved revision or an unapplied draft, with the same delivery preset/fit as the planned export. Paginates findings. Custom media and unsupported CSS are explicitly unassessed. Geometry estimates do not prove sharpness.',
+    schema: {projectDir, expectedRevision, draftId: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(),
+      fit: z.enum(['contain', 'cover']).optional(), maxUpscale: z.number().min(1).max(10).default(1.25),
+      offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(100).default(50)}, annotations: ro,
+    run: async args => {
+      let project = await loadProject(args.projectDir);
+      if (project.revision !== args.expectedRevision) throw Object.assign(new Error('Project revision changed'), {code: 'STALE_REVISION'});
+      if (args.draftId) {
+        const draft = await getDraft(args.projectDir, args.draftId);
+        if (draft.projectId !== project.id || draft.baseRevision !== project.revision) throw Object.assign(new Error('Draft is stale'), {code: 'STALE_REVISION'});
+        project = draft.snapshot;
+      }
+      if (args.fit && !args.preset) throw new Error('Choose a delivery preset when specifying its fit.');
+      if (args.preset) project = applyDeliveryPreset(project, args);
+      validateProject(project); await assertAssets(project);
+      return {...await inspectFraming(project, args), ...(args.draftId ? {draftId: args.draftId} : {}),
+        ...(args.preset ? {preset: args.preset, fit: args.fit ?? 'contain'} : {})};
+    }},
+  {name: 'export_render', description: 'Render one final MP4 with captions, overlays and the complete mix. Automatically checks crop/zoom enlargement and scans ALL encoded audio for possible speech gaps, using source word intervals where available even under music. Returns timestamped findings in quality.checks and an adjacent .quality.json fingerprint report. Review flagged ranges in the actual MP4 before sharing; intentional pauses need no automatic cuts. Music can mask missing speech and custom media needs direct review. Finals use H.264 CRF 18 and minimum short side 1080 by default. Creates new files and preserves originals.',
+    schema: {projectDir, expectedRevision, outputPath: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(), fit: z.enum(['contain', 'cover']).optional(), concurrency: z.number().int().min(1).max(8).optional(), minShortSide: z.number().int().min(2).max(8192).default(1080).describe('Minimum final short edge in pixels. Lower only for an intentional smaller delivery; does not resize the video.'),
+      maxUpscale: z.number().min(1).max(10).default(1.25), speechGapMinSeconds: z.number().min(.2).max(30).default(.8),
+      speechGapNoiseDb: z.number().min(-80).max(-15).default(-40)}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
-  {name: 'export_verify', description: 'Read-only check of the exact local video before delivery or upload. Recompute its fingerprint and encoded metadata against the adjacent .quality.json report. Preview files, missing or inconsistent reports and quality warnings cannot pass as a verified final. A technical pass does not establish visual sharpness or platform playback quality. Copy the report beside the video when moving it.',
+  {name: 'export_verify', description: 'Read-only check of the exact local video before delivery or upload. Recompute its fingerprint and encoded metadata against the adjacent .quality.json report and return saved framing/speech-gap findings. Review flagged MP4 ranges before sharing. Preview files, missing/inconsistent or older reports without these checks, and quality warnings cannot pass as a verified final. Does not rerun the speech scan or establish listening approval. Copy the report beside the video when moving it.',
     schema: {outputPath: z.string().min(1).refine(isAbsolute, 'outputPath must be absolute')}, annotations: ro,
     run: args => verifyExportQuality(args.outputPath)},
   {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Supports the built-in timeline and custom layer mode, where the engine owns timing and main clips. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Independent standalone compositions require adaptation to layer mode.',

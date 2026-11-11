@@ -3,6 +3,9 @@ import {resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import {z} from 'zod';
 import {fileFingerprint, run} from './media.mjs';
+import {compileTimeline} from './timeline.mjs';
+import {inspectFraming} from './framing-quality.mjs';
+import {scanSpeechGaps} from './speech-gaps.mjs';
 
 const positiveInteger = z.number().int().positive().safe();
 const nonnegativeInteger = z.number().int().nonnegative().safe();
@@ -36,7 +39,7 @@ const sourceResolutionSchema = z.object({
   unknownDimensionsCount: nonnegativeInteger,
   sizes: z.array(dimensionsSchema.extend({count: positiveInteger})),
 }).strict();
-const reportSchema = z.object({
+const legacyReportSchema = z.object({
   schemaVersion: z.literal(1),
   purpose: z.enum(['final', 'preview', 'source_preview', 'still']),
   status: z.enum(['passed', 'needs_review', 'not_final']),
@@ -58,12 +61,49 @@ const reportSchema = z.object({
   limitations: z.array(z.string()),
 }).strict();
 
+const findingRange = {startSeconds: z.number().nonnegative(), endSeconds: z.number().nonnegative()};
+const framingSchema = z.object({
+  version: z.literal(1), scope: z.literal('engine_raster_geometry'), revision: nonnegativeInteger,
+  threshold: z.number().min(1).max(10), assessedCount: nonnegativeInteger, unassessedCount: nonnegativeInteger,
+  totalFindings: nonnegativeInteger, offset: nonnegativeInteger, truncated: z.boolean(),
+  findings: z.array(z.object({code: z.enum(['EXCESSIVE_UPSCALE', 'FRAMING_UNASSESSED', 'CUSTOM_FRAMING_UNASSESSED']),
+    kind: z.enum(['clip', 'overlay', 'custom']), message: z.string(), itemId: z.string().optional(), assetId: z.string().optional(),
+    startFrame: nonnegativeInteger.optional(), endFrame: nonnegativeInteger.optional(),
+    startSeconds: z.number().nonnegative().optional(), endSeconds: z.number().nonnegative().optional(),
+    nativeWidth: positiveNumber.optional(), nativeHeight: positiveNumber.optional(),
+    boxWidth: positiveNumber.optional(), boxHeight: positiveNumber.optional(), fit: z.enum(['cover', 'contain']).optional(),
+    crop: z.record(z.number()).optional(), maxUpscale: positiveNumber.optional(), motionScale: positiveNumber.optional(),
+    worstFrame: nonnegativeInteger.optional(), worstSeconds: z.number().nonnegative().optional(),
+    sourceSeconds: z.number().nonnegative().nullable().optional(),
+    preview: z.object({kind: z.literal('still'), frame: nonnegativeInteger, scale: z.literal(1)}).strict().optional(),
+    suggestions: z.array(z.string()).optional(),
+  }).strict()), limitations: z.array(z.string()),
+}).strict();
+const speechSchema = z.object({
+  version: z.literal(1), status: z.enum(['completed', 'missing_audio']), scope: z.literal('entire_encoded_file'),
+  method: z.literal('decoded_audio_silence_and_source_word_intervals'), durationSeconds: positiveNumber,
+  decodedAudioSeconds: z.number().nonnegative(), minGapSeconds: z.number().min(.2).max(30), noiseDb: z.number().min(-80).max(-15),
+  transcriptCoverage: z.object({voiceTrackCount: nonnegativeInteger, unassessedTrackCount: nonnegativeInteger,
+    assessedSeconds: z.number().nonnegative(), customAudioUnassessed: z.boolean()}).strict(),
+  totalFindings: nonnegativeInteger, truncated: z.boolean(),
+  findings: z.array(z.object({code: z.enum(['QUIET_AUDIO_GAP', 'AUDIO_ENDS_EARLY', 'MISSING_AUDIO', 'TRANSCRIPT_SPEECH_GAP']),
+    ...findingRange, durationSeconds: positiveNumber, timelineStartSeconds: z.number().nonnegative(), timelineEndSeconds: z.number().nonnegative(),
+    reviewStartSeconds: z.number().nonnegative(), reviewEndSeconds: z.number().nonnegative()}).strict()),
+  limitations: z.array(z.string()),
+}).strict();
+const reportSchema = z.union([legacyReportSchema, legacyReportSchema.extend({schemaVersion: z.literal(2),
+  checks: z.object({framing: framingSchema, speechGaps: speechSchema.nullable()}).strict()})]);
+
 const limitations = [
   'These checks verify technical export properties. Watch the video at delivery size to judge visual quality.',
   'Visual softness, detail lost to cropping or upscaling, and quality after platform transcoding require visual review.',
   'Source dimensions summarize engine timeline references. Shot visibility, framing and custom-layer media can differ.',
   'The encoder settings are requested values. Bitrate is measured for context and does not determine pass or fail.',
 ];
+const currentLimitations = [limitations[0],
+  'Framing checks estimate enlargement for supported engine media. Focus, custom visuals and platform transcoding need direct review.',
+  'Speech-gap checks scan the full encoded audio and use source word intervals where available. Music can mask speech gaps.',
+  limitations[3]];
 
 function positive(value) {
   const number = Number(value);
@@ -191,6 +231,17 @@ function statusFor(purpose, warnings) {
   return warnings.length ? 'needs_review' : 'passed';
 }
 
+function reviewWarnings(report) {
+  const warnings = technicalWarnings(report);
+  if (report.schemaVersion !== 2) return warnings;
+  const {framing, speechGaps} = report.checks;
+  if (framing.totalFindings) warnings.push({code: 'FRAMING_REVIEW_REQUIRED', message: `${framing.totalFindings} framing finding(s). Inspect the indicated shots at delivery size.`});
+  if (speechGaps?.totalFindings) warnings.push({code: 'SPEECH_GAPS_REVIEW_REQUIRED', message: `${speechGaps.totalFindings} possible speech/audio gap(s). Listen to the flagged ranges in the encoded file before sharing.`});
+  if (report.purpose === 'final' && !speechGaps) warnings.push({code: 'SPEECH_SCAN_MISSING', message: 'The full-export speech-gap scan is missing.'});
+  if (framing.truncated || speechGaps?.truncated) warnings.push({code: 'REVIEW_FINDINGS_TRUNCATED', message: 'The entire export was checked, but the returned findings are capped. Additional review is required.'});
+  return warnings;
+}
+
 function summarizeSourceResolution(project) {
   const used = new Set([...project.clips, ...project.overlays].map((item) => item.assetId));
   const visual = project.assets.filter((asset) => used.has(asset.id) && ['video', 'image'].includes(asset.type));
@@ -213,7 +264,8 @@ function summarizeSourceResolution(project) {
 
 /** Measure the staged output before it is published and paired with its sidecar. */
 export async function buildExportQuality({filePath, project, kind, sourcePreview = false, composition,
-  dimensions, frameRange, scale, minShortSide = 1080, signal}) {
+  dimensions, frameRange, scale, minShortSide = 1080, maxUpscale = 1.25,
+  speechGapMinSeconds = .8, speechGapNoiseDb = -40, signal, onProgress}) {
   const {width, height, fps} = project.settings;
   const target = targetSchema.parse({width, height, fps, minShortSide});
   const render = renderSchema.parse({
@@ -226,10 +278,23 @@ export async function buildExportQuality({filePath, project, kind, sourcePreview
   });
   if (!validFrameRange(render)) throw new Error('Invalid export quality frame range.');
   const actual = await inspectMedia(resolve(filePath), signal);
-  const report = {schemaVersion: 1, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
+  const timeline = compileTimeline(project);
+  onProgress?.({stage: 'framing_quality', progress: 0});
+  const framing = await inspectFraming(project, {timeline, scale, frameRange: frameRange ?? [0, timeline.durationInFrames - 1], maxUpscale, signal});
+  if (kind === 'video' && !sourcePreview) onProgress?.({stage: 'speech_gap_scan', progress: 0});
+  const speechGaps = kind === 'video' && !sourcePreview ? await scanSpeechGaps(resolve(filePath), {project, timeline,
+    duration: actual.measured.durationSeconds, hasAudio: actual.measured.audioCodec !== null,
+    startSeconds: (frameRange?.[0] ?? 0) / composition.fps, minGapSeconds: speechGapMinSeconds, noiseDb: speechGapNoiseDb, signal}) : null;
+  // Guard the entire scan, not just the metadata read, against file replacement.
+  if ((await fileFingerprint(filePath)).slice('sha256:'.length) !== actual.fingerprint.sha256) {
+    throw Object.assign(new Error('The export changed during its full-file checks.'), {code: 'EXPORT_CHANGED'});
+  }
+  const report = {schemaVersion: 2, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
     ...actual, target, render, encoding: encodingFor(kind), sourceResolution: summarizeSourceResolution(project)};
-  const warnings = technicalWarnings(report);
-  return {...report, status: statusFor(report.purpose, warnings), warnings, limitations: [...limitations]};
+  report.checks = {framing, speechGaps};
+  const warnings = reviewWarnings(report);
+  signal?.throwIfAborted();
+  return reportSchema.parse({...report, status: statusFor(report.purpose, warnings), warnings, limitations: [...currentLimitations]});
 }
 
 function consistentReport(report) {
@@ -238,9 +303,18 @@ function consistentReport(report) {
     !isDeepStrictEqual(encoding, encodingFor(render.kind))) return false;
   if (sourceResolution.visualAssetCount !== sourceResolution.unknownDimensionsCount +
     sourceResolution.sizes.reduce((total, size) => total + size.count, 0)) return false;
-  const warnings = technicalWarnings(report);
+  if (report.schemaVersion === 2) {
+    const {framing, speechGaps} = report.checks;
+    if (framing.revision !== report.revision || framing.offset !== 0 ||
+      framing.totalFindings < framing.findings.length || framing.truncated !== (framing.totalFindings > framing.findings.length)) return false;
+    if (speechGaps && (speechGaps.totalFindings < speechGaps.findings.length ||
+      speechGaps.truncated !== (speechGaps.totalFindings > speechGaps.findings.length) ||
+      speechGaps.durationSeconds !== report.measured.durationSeconds ||
+      speechGaps.findings.some(x => x.endSeconds <= x.startSeconds || x.endSeconds > speechGaps.durationSeconds + .001))) return false;
+  }
+  const warnings = reviewWarnings(report);
   return report.status === statusFor(purpose, warnings) && isDeepStrictEqual(report.warnings, warnings) &&
-    isDeepStrictEqual(report.limitations, limitations);
+    isDeepStrictEqual(report.limitations, report.schemaVersion === 2 ? currentLimitations : limitations);
 }
 
 async function readQualityReport(sidecar, signal) {
@@ -280,7 +354,8 @@ export async function verifyExportQuality(filePath, {signal} = {}) {
   const metadataMatches = isDeepStrictEqual(saved.measured, actual.measured);
   const matched = fingerprintMatches && metadataMatches;
   const report = {...saved, ...actual};
-  const warnings = technicalWarnings(report);
+  const warnings = reviewWarnings(report);
+  if (saved.schemaVersion === 1) warnings.push({code: 'EXPORT_REVIEW_CHECKS_MISSING', message: 'This older export report predates framing and full-file speech-gap checks. Export again to run them.'});
   if (!fingerprintMatches) warnings.push({code: 'EXPORT_FINGERPRINT_MISMATCH', message: 'The file bytes differ from the saved export.'});
   if (!metadataMatches) warnings.push({code: 'EXPORT_METADATA_MISMATCH', message: 'The measured media metadata differs from the saved report.'});
   const status = statusFor(report.purpose, warnings);
