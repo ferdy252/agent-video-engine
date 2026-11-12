@@ -112,7 +112,7 @@ try {
       renderSnapshot = {...job.snapshot, audio: undefined, custom: undefined, transcripts: [], overlays: [],
         assets: job.snapshot.assets.map(({color, ...asset}) => asset),
         settings: {...job.snapshot.settings, width: asset.width || 640, height: asset.height || 360},
-        captions: {...job.snapshot.captions, enabled: false}, clips: [{id: 'source-preview', assetId: asset.id,
+        captions: {...job.snapshot.captions, enabled: false, wordOverrides: []}, clips: [{id: 'source-preview', assetId: asset.id,
           sourceStart: start, sourceEnd: end, playbackRate: 1, volume: 1, fit: 'contain'}]};
     }
     result = await renderProject(renderSnapshot, {...job.request, signal: controller.signal, onProgress});

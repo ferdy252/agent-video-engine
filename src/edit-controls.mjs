@@ -125,12 +125,12 @@ export function captionCues(words, style, fps) {
   const pages = [];
   for (const word of words.slice().sort((a, b) => a.startFrame - b.startFrame)) {
     const page = pages.at(-1), previous = page?.at(-1);
-    if (!page || page.length >= style.wordsPerPage || previous.clipId !== word.clipId || word.startFrame - previous.endFrame > fps * .4) pages.push([word]);
+    if (!page || word.pageBreakBefore || page.length >= style.wordsPerPage || previous.clipId !== word.clipId || word.startFrame - previous.endFrame > fps * .4) pages.push([word]);
     else page.push(word);
   }
   return pages.map((page, i) => {
     const startFrame = page[0].startFrame, endFrame = Math.min(page.at(-1).endFrame, pages[i + 1]?.[0].startFrame ?? Infinity);
-    return {id: `caption-${page[0].clipId}-${page[0].id}`, text: page.map(w => w.text).join(' '), start: startFrame / fps, end: endFrame / fps, startFrame, endFrame, words: page};
+    return {id: `caption-${page[0].clipId}-${page[0].id}`, text: page.map((w, i) => `${i ? w.lineBreakBefore ? '\n' : ' ' : ''}${w.text}`).join(''), start: startFrame / fps, end: endFrame / fps, startFrame, endFrame, words: page};
   }).filter(cue => cue.endFrame > cue.startFrame);
 }
 export const GRAPHIC_PRESETS = Object.freeze({

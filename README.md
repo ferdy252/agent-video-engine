@@ -11,7 +11,7 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 - Cut by transcript words, insert pauses and blend neighboring clips. Start sound before the picture changes or let it continue afterward.
 - Reframe footage, adjust its color and animate changes in position, size or opacity.
 - Balance voice, music and effects. Lower music under speech and reduce mild background noise.
-- Edit caption wording, line breaks and timing. Add reusable titles, name labels and callouts, or attach graphics to spoken words.
+- Correct caption words and line breaks while keeping them synced through later cuts, with word highlighting intact. Add titles, name labels and callouts, or attach graphics to spoken words.
 - Export vertical, wide or square video, subtitle files and an editable timeline for compatible editors.
 - Move a project with its source media or reconnect a recording that moved.
 - Flag crops and zooms that enlarge footage too much, with timestamps for review.

@@ -6,6 +6,7 @@ import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateC
 import {applyColorPatch, validateColorSettings} from './color-settings.mjs';
 import {fileFingerprint} from './media.mjs';
 import {validateVisual, validateSequence, validateCaptionCues, GRAPHIC_PRESETS} from './edit-controls.mjs';
+import {prepareCaptionOverrides, validateCaptionOverrides} from './caption-overrides.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
 
@@ -201,6 +202,7 @@ export function validateProject(project, {allowMissingAssets = false} = {}) {
   number(project.captions.wordsPerPage, 'captions.wordsPerPage', {min: 1, max: 50, integer: true});
   for (const key of ['color', 'highlightColor']) string(project.captions[key], `captions.${key}`);
   validateCaptionCues(project.captions.cues);
+  validateCaptionOverrides(project.captions.wordOverrides, project.transcripts);
   let previousCaptionEnd = 0;
   for (const cue of project.captions.cues ?? []) {
     const start = Math.round(cue.start * project.settings.fps), end = Math.round(cue.end * project.settings.fps);
@@ -495,6 +497,7 @@ function applyOperation(project, operation) {
     }
     case 'set_captions': object(operation.patch, 'patch'); project.captions = {...project.captions, ...clone(operation.patch)}; break;
     case 'set_caption_cues': project.captions.cues = clone(operation.cues); break;
+    case 'set_caption_overrides': project.captions.wordOverrides = prepareCaptionOverrides(clone(operation.overrides), project.transcripts); break;
     case 'set_settings': object(operation.patch, 'patch'); project.settings = {...project.settings, ...clone(operation.patch)}; break;
     case 'set_audio': {
       validateAudioSettings(operation.patch);

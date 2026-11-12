@@ -144,6 +144,7 @@ export async function exportSubtitles(project, {outputPath, format, signal} = {}
   const output = await publishFile(outputPath, `.${format}`, data, {signal});
   return {kind: 'subtitles', format, revision: snapshot.revision, outputPath: output,
     cueCount: cues.length, fps: timeline.fps, durationInFrames: timeline.durationInFrames,
+    ...(timeline.captionOverrideReview ? {captionOverrideReview: timeline.captionOverrideReview} : {}),
     limitations: ['Subtitle sidecars carry cue text and timing. Caption typography, placement and per-word highlighting stay in the rendered video.']};
 }
 

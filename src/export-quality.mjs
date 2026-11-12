@@ -92,7 +92,11 @@ const speechSchema = z.object({
   limitations: z.array(z.string()),
 }).strict();
 const reportSchema = z.union([legacyReportSchema, legacyReportSchema.extend({schemaVersion: z.literal(2),
-  checks: z.object({framing: framingSchema, speechGaps: speechSchema.nullable()}).strict()})]);
+  checks: z.object({framing: framingSchema, speechGaps: speechSchema.nullable(),
+    captionOverrides: z.object({active: z.boolean(), totalFindings: nonnegativeInteger, truncated: z.boolean(),
+      findings: z.array(z.object({code: z.literal('CAPTION_GROUP_INTERRUPTED'), clipId: z.string(), assetId: z.string(),
+        wordIds: z.array(z.string()), frame: nonnegativeInteger, message: z.string()}).strict())}).strict().optional(),
+  }).strict()})]);
 
 const limitations = [
   'These checks verify technical export properties. Watch the video at delivery size to judge visual quality.',
@@ -239,6 +243,7 @@ function reviewWarnings(report) {
   if (speechGaps?.totalFindings) warnings.push({code: 'SPEECH_GAPS_REVIEW_REQUIRED', message: `${speechGaps.totalFindings} possible speech/audio gap(s). Listen to the flagged ranges in the encoded file before sharing.`});
   if (report.purpose === 'final' && !speechGaps) warnings.push({code: 'SPEECH_SCAN_MISSING', message: 'The full-export speech-gap scan is missing.'});
   if (framing.truncated || speechGaps?.truncated) warnings.push({code: 'REVIEW_FINDINGS_TRUNCATED', message: 'The entire export was checked, but the returned findings are capped. Additional review is required.'});
+  if (report.checks.captionOverrides?.totalFindings) warnings.push({code: 'CAPTION_OVERRIDES_REVIEW_REQUIRED', message: 'Cuts interrupted a corrected caption phrase. Inspect captionOverrideReview and the displayed retained words.'});
   return warnings;
 }
 
@@ -291,7 +296,7 @@ export async function buildExportQuality({filePath, project, kind, sourcePreview
   }
   const report = {schemaVersion: 2, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
     ...actual, target, render, encoding: encodingFor(kind), sourceResolution: summarizeSourceResolution(project)};
-  report.checks = {framing, speechGaps};
+  report.checks = {framing, speechGaps, ...(timeline.captionOverrideReview ? {captionOverrides: timeline.captionOverrideReview} : {})};
   const warnings = reviewWarnings(report);
   signal?.throwIfAborted();
   return reportSchema.parse({...report, status: statusFor(report.purpose, warnings), warnings, limitations: [...currentLimitations]});
@@ -305,6 +310,10 @@ function consistentReport(report) {
     sourceResolution.sizes.reduce((total, size) => total + size.count, 0)) return false;
   if (report.schemaVersion === 2) {
     const {framing, speechGaps} = report.checks;
+    const captions = report.checks.captionOverrides;
+    if (captions && (captions.totalFindings < captions.findings.length ||
+      captions.truncated !== (captions.totalFindings > captions.findings.length) ||
+      (!captions.active && captions.totalFindings))) return false;
     if (framing.revision !== report.revision || framing.offset !== 0 ||
       framing.totalFindings < framing.findings.length || framing.truncated !== (framing.totalFindings > framing.findings.length)) return false;
     if (speechGaps && (speechGaps.totalFindings < speechGaps.findings.length ||

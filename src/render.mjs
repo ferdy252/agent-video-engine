@@ -412,7 +412,7 @@ export async function renderProject(project, options = {}) {
   validateProject(project);
   await assertAssets(project);
   let timeline = compileTimeline(project);
-  if (timeline.custom && timeline.custom.mode !== 'layer' && (project.captions.cues != null ||
+  if (timeline.custom && timeline.custom.mode !== 'layer' && (project.captions.cues != null || project.captions.wordOverrides?.length ||
     project.clips.some(clip => clip.type === 'gap' || clip.transition || clip.crop || clip.focus || clip.motion ||
       clip.audio?.sourceStart !== undefined || clip.audio?.assetId !== undefined || clip.audio?.offset) ||
     project.overlays.some(overlay => overlay.preset || overlay.motion || overlay.crop || overlay.focus))) {

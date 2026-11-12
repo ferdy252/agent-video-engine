@@ -319,6 +319,7 @@ Custom motion registered with `mode: "layer"` shares the engine clock and is sup
 | `remove_overlay` | `overlayId` |
 | `set_captions` | `patch` with caption-style fields or explicit `cues` |
 | `set_caption_cues` | `cues` with `{id, text, start, end}` entries, or `null` to regenerate from words |
+| `set_caption_overrides` | `overrides` with source `assetId`, consecutive `wordIds`, optional replacement `text`, `lineBreakBefore`, `pageBreakBefore`; `[]` clears all corrections |
 | `set_settings` | `patch` with output settings |
 | `set_audio` | `patch` with mix, leveling, finishing, ducking and denoise settings |
 | `set_clip_audio` | `clipId`, `patch` with audio role, gain, trims, offset, fades or envelope, or `null` to reset |
@@ -370,9 +371,32 @@ Set `motion` on a main visual clip or overlay using any of `x`, `y`, `scale`, `r
 
 ## Edit caption cues
 
+### Corrections that follow the source
+
+Use `set_caption_overrides` for spelling fixes and line/page breaks that should follow later trims, playback-rate changes, rearrangement and repeated uses of the source. It replaces the complete override list, so preserve other corrections when changing one. Read stable IDs with `transcript_search`; pass source IDs, not the displayed caption-page IDs.
+
+```json
+{
+  "type": "set_caption_overrides",
+  "overrides": [
+    {"assetId": "voice", "wordIds": ["w12", "w13"], "text": "ChatGPT"},
+    {"assetId": "voice", "wordIds": ["w14"], "lineBreakBefore": true},
+    {"assetId": "voice", "wordIds": ["w19"], "pageBreakBefore": true}
+  ]
+}
+```
+
+In this example two adjacent recognition tokens become one displayed word, highlighted over their retained combined interval. A line break starts the next word on another line within its page; a page break starts a new page. Automatic page-length, cut and pause boundaries still apply. Replacements cannot contain newlines; use the break controls. Corrections change display text only. Source words, native timing, spoken audio, transcript search, word-based cuts and graphic anchors are unchanged. Rendered captions and SRT/VTT exports use the same corrected text and timing.
+
+Corrections apply to every retained use of those source words. They survive splits outside a grouped phrase. If a cut, split or overlapping speech interrupts a multiword group, the retained original words display and `captionOverrideReview` flags the affected clip/frame rather than guessing replacement text for a fragment. Inspect it in `project_inspect`/`draft_inspect` with `includeTimeline`, `edit_apply`, subtitle results and `quality.checks.captionOverrides` after moving renders. Fully removed phrases disappear without a warning. Adjust the correction or cut and inspect the next result. Findings are capped at 100 with explicit total/truncation fields.
+
+The saved override includes its original word evidence. Reimporting a transcript that changes those words, IDs or times fails atomically while affected overrides remain. Clear those overrides before importing changed words, then reapply corrections using the new IDs and timings. `overrides: []` restores original display wording. Existing projects without overrides keep their existing behavior. Independent custom compositions must adopt engine layer mode to use these controls.
+
+### Fixed output cues
+
 Source words from the main voice clips are retimed into automatic caption pages. With split audio, the pages follow its selected source and output placement. To change wording, line breaks or display timing, send `set_caption_cues` with ordered cues containing `id`, `text`, `start` and `end`. Cue times are output seconds. Each cue needs at least one output frame, and cues cannot overlap. Use a newline in `text` for a new line.
 
-Manual cues are fixed to output time. After changing cuts, review their timing or send `cues: null` to return to automatic pages. An empty array gives no cues. The source transcript and its stable word IDs continue to drive word-based cuts and anchors. Inspect `timeline.captionCues` for the displayed cues and `timeline.captions` for the retimed source words. SRT and VTT exports use the compiled cue timing. [Delivery guide](delivery.md)
+Manual cues are fixed to output time and take precedence over linked overrides. After changing cuts, review their timing or send `cues: null` to return to automatic pages with any saved overrides. An empty cue array gives no cues. Fixed cues do not provide word highlighting. The source transcript and its stable word IDs continue to drive word-based cuts and anchors. Inspect `timeline.captionCues` for the displayed cues and `timeline.captions` for the original retimed source words. SRT and VTT exports use the compiled cue timing. [Delivery guide](delivery.md)
 
 ## Source timing and word anchors
 

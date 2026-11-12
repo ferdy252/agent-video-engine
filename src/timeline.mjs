@@ -1,6 +1,7 @@
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {resolveColorSettings} from './color-settings.mjs';
 import {clipSeconds, captionCues} from './edit-controls.mjs';
+import {applyCaptionOverrides} from './caption-overrides.mjs';
 
 /** Compile one source-linked edit into the common output frame clock. */
 export function compileTimeline(project) {
@@ -45,6 +46,7 @@ export function compileTimeline(project) {
     clips[i].outgoingTransitionType = clips[i + 1].transition?.type;
   }
   const captions = retimeWords(project, clips);
+  const displayCaptions = applyCaptionOverrides(captions, project.captions, clips);
   const overlays = project.overlays.flatMap((overlay) => {
     let start = overlay.start;
     let end = overlay.end;
@@ -71,7 +73,8 @@ export function compileTimeline(project) {
   return {
     fps, width, height, durationInFrames, clips, overlays,
     captions,
-    captionCues: captionCues(captions, project.captions, fps),
+    captionCues: captionCues(displayCaptions.words, project.captions, fps),
+    ...(project.captions.wordOverrides?.length ? {captionOverrideReview: displayCaptions.review} : {}),
     settings: project.settings,
     captionsStyle: project.captions,
     audio: resolveAudioSettings(project.audio),

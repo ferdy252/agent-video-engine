@@ -41,7 +41,7 @@ Framing reports return at most 100 findings in exports (paginate `quality_prefli
 
 Call `export_subtitles` with `format` of `srt` or `vtt` and the matching filename extension. `outputPath` can be absolute or relative to the project. The sidecar uses the same compiled cue boundaries as the edit and stops at the end of the video. Explicit output cues take precedence over pages grouped from the retimed source transcript. Both formats preserve multiline text and write times to the nearest millisecond. WebVTT escapes literal text markup. You can export a sidecar with burned-in captions turned off.
 
-The sidecar carries text and timing. The rendered MP4 carries the caption design, including highlighting on automatic word pages.
+The sidecar carries text and timing. The rendered MP4 carries the caption design, including highlighting on automatic word pages. Source-linked caption overrides flow into both the burned-in text and SRT/VTT, including line breaks. If a cut interrupts a grouped correction, `captionOverrideReview` identifies the affected occurrences; the export quality report also carries the finding. Original transcript text and audio remain unchanged. Fixed manual cues continue to take precedence over source-linked overrides.
 
 ## Editable handoff
 

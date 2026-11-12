@@ -145,7 +145,7 @@ function CaptionPages({timeline}: {timeline: Timeline}) {
       <div style={{padding: '.18em .35em', borderRadius: 12, backgroundColor: 'rgba(0,0,0,.78)', fontSize: style.fontSize ?? 56, lineHeight: 1.2,
         fontWeight: 700, textAlign: 'center', whiteSpace: 'pre-wrap', color: style.color ?? '#ffffff'}}>
         {cue.words ? cue.words.map((word: any, i: number) => <React.Fragment key={`${word.id}-${i}`}>
-          {i ? ' ' : ''}<span style={{color: i === active ? style.highlightColor ?? '#ffd860' : style.color ?? '#ffffff'}}>{word.text}</span>
+          {i ? word.lineBreakBefore ? '\n' : ' ' : ''}<span style={{color: i === active ? style.highlightColor ?? '#ffd860' : style.color ?? '#ffffff'}}>{word.text}</span>
         </React.Fragment>) : cue.text}
       </div>
     </div>;
