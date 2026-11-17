@@ -42,7 +42,7 @@ test('full-file scan finds leading, internal and trailing gaps far from joins', 
   assert.equal(await fileFingerprint(path), fingerprint);
   const report = await buildExportQuality({filePath: path, project, kind: 'video', composition: {...project.settings, durationInFrames: 100},
     dimensions: {width: 160, height: 90}, frameRange: [0, 99], scale: 1, minShortSide: 90});
-  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.schemaVersion, 3);
   assert.equal(report.status, 'needs_review');
   assert.ok(report.warnings.some(warning => warning.code === 'SPEECH_GAPS_REVIEW_REQUIRED'));
   await writeFile(`${path}.quality.json`, JSON.stringify(report));

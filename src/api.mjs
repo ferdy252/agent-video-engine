@@ -12,6 +12,7 @@ import {startJob, startBundleOpen, getJob, cancelJob, retryJob, listJobs} from '
 import {importLegacyProject} from './import-legacy.mjs';
 import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
 import {COLOR_LIMITS} from './color-settings.mjs';
+import {frameContext} from './encoded-review.mjs';
 import {verifyExportQuality} from './export-quality.mjs';
 import {inspectFraming} from './framing-quality.mjs';
 import {applyDeliveryPreset} from './delivery.mjs';
@@ -255,14 +256,23 @@ export const toolDefinitions = [
       return {...await inspectFraming(project, args), ...(args.draftId ? {draftId: args.draftId} : {}),
         ...(args.preset ? {preset: args.preset, fit: args.fit ?? 'contain'} : {})};
     }},
-  {name: 'export_render', description: 'Render one final MP4 with captions, overlays and the complete mix. Automatically checks crop/zoom enlargement and scans ALL encoded audio for possible speech gaps, using source word intervals where available even under music. Returns timestamped findings in quality.checks and an adjacent .quality.json fingerprint report. Review flagged ranges in the actual MP4 before sharing; intentional pauses need no automatic cuts. Music can mask missing speech and custom media needs direct review. Finals use H.264 CRF 18 and minimum short side 1080 by default. Creates new files and preserves originals.',
+  {name: 'export_render', description: 'Render one final MP4 with captions, overlays and the complete mix. Scans the encoded picture for isolated single-frame glitches and reports zero-based frames for export_frame_context. Automatically checks crop/zoom enlargement and scans ALL encoded audio for possible speech gaps, using source word intervals where available even under music. Returns timestamped findings in quality.checks and an adjacent .quality.json fingerprint report. Review flagged ranges in the actual MP4 before sharing; intentional pauses need no automatic cuts. Music can mask missing speech and custom media needs direct review. Finals use H.264 CRF 18 and minimum short side 1080 by default. Creates new files and preserves originals.',
     schema: {projectDir, expectedRevision, outputPath: z.string().optional(), preset: z.enum(['vertical', 'horizontal', 'square']).optional(), fit: z.enum(['contain', 'cover']).optional(), concurrency: z.number().int().min(1).max(8).optional(), minShortSide: z.number().int().min(2).max(8192).default(1080).describe('Minimum final short edge in pixels. Lower only for an intentional smaller delivery; does not resize the video.'),
       maxUpscale: z.number().min(1).max(10).default(1.25), speechGapMinSeconds: z.number().min(.2).max(30).default(.8),
       speechGapNoiseDb: z.number().min(-80).max(-15).default(-40)}, annotations: edit,
     run: args => renderJob({...args, kind: 'video', scale: 1})},
-  {name: 'export_verify', description: 'Read-only check of the exact local video before delivery or upload. Recompute its fingerprint and encoded metadata against the adjacent .quality.json report and return saved framing/speech-gap findings. Review flagged MP4 ranges before sharing. Preview files, missing/inconsistent or older reports without these checks, and quality warnings cannot pass as a verified final. Does not rerun the speech scan or establish listening approval. Copy the report beside the video when moving it.',
+  {name: 'export_verify', description: 'Read-only check of the exact local video before delivery or upload. Recompute its fingerprint and encoded metadata against the adjacent .quality.json report and return saved framing, speech-gap and isolated-frame findings. Review flagged MP4 ranges before sharing. Preview files, missing/inconsistent or older reports without these checks, and quality warnings cannot pass as a verified final. Does not rerun the speech scan or establish listening approval. Copy the report beside the video when moving it.',
     schema: {outputPath: z.string().min(1).refine(isAbsolute, 'outputPath must be absolute')}, annotations: ro,
     run: args => verifyExportQuality(args.outputPath)},
+  {name: 'export_frame_context', description: 'Show the previous, flagged and next frame of an encoded MP4 left to right. Use the zero-based frame from checks.frameGlitches. Reads the actual local export.',
+    schema: {outputPath: z.string().min(1), frame: z.number().int().min(1)}, annotations: ro,
+    run: ({outputPath, frame}) => frameContext(resolve(outputPath), frame)},
+  {name: 'export_compare', description: 'Compare the decoded picture and audio in two same-clock local exports. Choose the approved MP4 as baselinePath. Mark expected picture, audio or both changes as half-open ranges in output seconds. Returns a durable job with unexpected differences outside those ranges, or incompatible clocks. Does not edit either file.',
+    schema: {projectDir, baselinePath: z.string().min(1), candidatePath: z.string().min(1),
+      expectedChanges: z.array(z.object({track: z.enum(['picture', 'audio', 'both']), startSeconds: z.number().nonnegative(),
+        endSeconds: z.number().positive()}).strict()).max(200).default([])}, annotations: edit,
+    run: args => startJob(args.projectDir, {...args, baselinePath: resolve(args.projectDir, args.baselinePath),
+      candidatePath: resolve(args.projectDir, args.candidatePath), type: 'export_compare'})},
   {name: 'review_cuts', description: 'Review source-linked timeline joins without changing the edit. Supports the built-in timeline and custom layer mode, where the engine owns timing and main clips. Flags transcript words cut at a boundary, measured audio level jumps and long silence near a join. Creates short mixed-master preview clips and a local report. Returns a durable job ID; read job_get for results. Measurements are review cues, not a verdict on naturalness. Use offset/limit to review long edits in batches. Independent standalone compositions require adaptation to layer mode.',
     schema: {projectDir, expectedRevision, contextSeconds: z.number().min(0.25).max(3).default(1),
       offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20),

@@ -14,6 +14,8 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 - Correct caption words and line breaks while keeping them synced through later cuts, with word highlighting intact. Add titles, name labels and callouts, or attach graphics to spoken words.
 - Export vertical, wide or square video, subtitle files and an editable timeline for compatible editors.
 - Move a project with its source media or reconnect a recording that moved.
+- Find isolated picture glitches in an exported MP4 and view the frame between its neighbors.
+- Compare two exported MP4s and flag unexpected picture or audio changes outside the requested edit.
 - Flag crops and zooms that enlarge footage too much, with timestamps for review.
 - Scan the whole exported video's audio for possible speech gaps and report the moments to listen to before sharing.
 

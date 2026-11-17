@@ -22,14 +22,14 @@ const project = {
 };
 
 async function fixture(t, {size = '160x90', codec = 'libx264', pixelFormat = 'yuv420p',
-  audioCodec = 'aac', extension = 'mp4', still = false} = {}) {
+  audioCodec = 'aac', extension = 'mp4', still = false, pictureFilter = 'null'} = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-video-export-quality-'));
   t.after(() => rm(directory, {recursive: true, force: true}));
   const filePath = join(directory, still ? 'example.png' : `example.${extension}`);
   await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=blue:s=${size}:r=10:d=0.4`,
     ...(still ? ['-frames:v', '1', '-c:v', 'png', '-update', '1'] :
       [...(audioCodec ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono', '-c:a', audioCodec, '-shortest'] : ['-an']),
-        '-c:v', codec, '-pix_fmt', pixelFormat, '-metadata', 'title=quality-byte-marker-a']),
+        '-vf', pictureFilter, '-c:v', codec, '-pix_fmt', pixelFormat, '-metadata', 'title=quality-byte-marker-a']),
     filePath]);
   return filePath;
 }
@@ -175,4 +175,28 @@ test('older sidecars remain readable but do not imply new framing or speech chec
   assert.equal(result.verification.report, 'matched');
   assert.equal(result.verification.verifiedFinal, false);
   assert.ok(warningCodes(result).includes('EXPORT_REVIEW_CHECKS_MISSING'));
+});
+
+test('new final and preview reports retain isolated-frame evidence and older finals disclose the missing scan', async t => {
+  const path = await fixture(t, {pictureFilter: "drawbox=color=white:t=fill:enable='eq(n,2)'"});
+  const report = await build(path, {minShortSide: 90});
+  assert.deepEqual(report.checks.frameGlitches.findings, [{frame: 2, seconds: .2}]);
+  assert.ok(warningCodes(report).includes('ISOLATED_FRAMES_REVIEW_REQUIRED'));
+  await save(path, report);
+  const verified = await verifyExportQuality(path);
+  assert.equal(verified.verification.report, 'matched');
+  assert.equal(verified.verification.verifiedFinal, false);
+  const preview = await build(path, {kind:'preview', minShortSide:90});
+  assert.deepEqual(preview.checks.frameGlitches, report.checks.frameGlitches);
+  assert.equal(preview.status, 'not_final');
+  const legacy = structuredClone(report);
+  legacy.schemaVersion = 2;
+  delete legacy.checks.frameGlitches;
+  legacy.warnings = legacy.warnings.filter(w => w.code !== 'ISOLATED_FRAMES_REVIEW_REQUIRED');
+  legacy.status = legacy.warnings.length ? 'needs_review' : 'passed';
+  await save(path, legacy);
+  const old = await verifyExportQuality(path);
+  assert.equal(old.verification.report, 'matched');
+  assert.ok(warningCodes(old).includes('FRAME_GLITCH_SCAN_MISSING'));
+  assert.equal(old.verification.verifiedFinal, false);
 });

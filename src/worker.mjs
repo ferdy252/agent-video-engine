@@ -52,7 +52,7 @@ try {
   await update({status: 'running', stage: openingBundle ? 'Checking project bundle'
     : creatingBundle ? 'Packaging project files' : 'Checking original assets', startedAt: new Date().toISOString()});
   // Bundle copies verify the fingerprints as they stream, without reading large files twice.
-  if (!openingBundle && !creatingBundle) await assertAssets(job.snapshot);
+  if (!openingBundle && !creatingBundle && job.type !== 'export_compare') await assertAssets(job.snapshot);
   const onProgress = (value, label) => {
     const progress = typeof value === 'object' ? value.progress : value;
     const stage = typeof value === 'object' ? value.stage : label;
@@ -87,6 +87,9 @@ try {
     const {renderColorComparison} = await import('./color-preview.mjs');
     result = await renderColorComparison(job.snapshot, {...job.request,
       outputDir: join(projectDir, '.engine/color-previews', id), signal: controller.signal, onProgress});
+  } else if (job.type === 'export_compare') {
+    const {compareExports} = await import('./export-compare.mjs');
+    result = await compareExports({...job.request, signal: controller.signal, onProgress});
   } else if (job.type === 'review_cuts') {
     const {reviewCuts} = await import('./cut-review.mjs');
     result = await reviewCuts(job.snapshot, {...job.request, projectDir,

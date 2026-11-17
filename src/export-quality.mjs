@@ -5,6 +5,7 @@ import {z} from 'zod';
 import {fileFingerprint, run} from './media.mjs';
 import {compileTimeline} from './timeline.mjs';
 import {inspectFraming} from './framing-quality.mjs';
+import {scanFrameGlitches} from './encoded-review.mjs';
 import {scanSpeechGaps} from './speech-gaps.mjs';
 
 const positiveInteger = z.number().int().positive().safe();
@@ -91,12 +92,17 @@ const speechSchema = z.object({
     reviewStartSeconds: z.number().nonnegative(), reviewEndSeconds: z.number().nonnegative()}).strict()),
   limitations: z.array(z.string()),
 }).strict();
-const reportSchema = z.union([legacyReportSchema, legacyReportSchema.extend({schemaVersion: z.literal(2),
+const v2Report = legacyReportSchema.extend({schemaVersion: z.literal(2),
   checks: z.object({framing: framingSchema, speechGaps: speechSchema.nullable(),
     captionOverrides: z.object({active: z.boolean(), totalFindings: nonnegativeInteger, truncated: z.boolean(),
       findings: z.array(z.object({code: z.literal('CAPTION_GROUP_INTERRUPTED'), clipId: z.string(), assetId: z.string(),
         wordIds: z.array(z.string()), frame: nonnegativeInteger, message: z.string()}).strict())}).strict().optional(),
-  }).strict()})]);
+  }).strict()});
+const glitchSchema = z.object({decodedFrames: positiveInteger, totalFindings: nonnegativeInteger,
+  findings: z.array(z.object({frame: positiveInteger, seconds: z.number().nonnegative()}).strict()).max(100),
+  truncated: z.boolean()}).strict();
+const reportSchema = z.union([legacyReportSchema, v2Report, v2Report.extend({schemaVersion: z.literal(3),
+  checks: v2Report.shape.checks.extend({frameGlitches: glitchSchema.nullable()})})]);
 
 const limitations = [
   'These checks verify technical export properties. Watch the video at delivery size to judge visual quality.',
@@ -237,12 +243,14 @@ function statusFor(purpose, warnings) {
 
 function reviewWarnings(report) {
   const warnings = technicalWarnings(report);
-  if (report.schemaVersion !== 2) return warnings;
+  if (report.schemaVersion < 2) return warnings;
   const {framing, speechGaps} = report.checks;
   if (framing.totalFindings) warnings.push({code: 'FRAMING_REVIEW_REQUIRED', message: `${framing.totalFindings} framing finding(s). Inspect the indicated shots at delivery size.`});
   if (speechGaps?.totalFindings) warnings.push({code: 'SPEECH_GAPS_REVIEW_REQUIRED', message: `${speechGaps.totalFindings} possible speech/audio gap(s). Listen to the flagged ranges in the encoded file before sharing.`});
   if (report.purpose === 'final' && !speechGaps) warnings.push({code: 'SPEECH_SCAN_MISSING', message: 'The full-export speech-gap scan is missing.'});
-  if (framing.truncated || speechGaps?.truncated) warnings.push({code: 'REVIEW_FINDINGS_TRUNCATED', message: 'The entire export was checked, but the returned findings are capped. Additional review is required.'});
+  const glitches = report.checks.frameGlitches;
+  if (glitches?.totalFindings) warnings.push({code: 'ISOLATED_FRAMES_REVIEW_REQUIRED', message: `${glitches.totalFindings} isolated frame change(s). Inspect the reported frame and its neighbors in the encoded file.`});
+  if (framing.truncated || speechGaps?.truncated || glitches?.truncated) warnings.push({code: 'REVIEW_FINDINGS_TRUNCATED', message: 'The entire export was checked, but the returned findings are capped. Additional review is required.'});
   if (report.checks.captionOverrides?.totalFindings) warnings.push({code: 'CAPTION_OVERRIDES_REVIEW_REQUIRED', message: 'Cuts interrupted a corrected caption phrase. Inspect captionOverrideReview and the displayed retained words.'});
   return warnings;
 }
@@ -290,13 +298,18 @@ export async function buildExportQuality({filePath, project, kind, sourcePreview
   const speechGaps = kind === 'video' && !sourcePreview ? await scanSpeechGaps(resolve(filePath), {project, timeline,
     duration: actual.measured.durationSeconds, hasAudio: actual.measured.audioCodec !== null,
     startSeconds: (frameRange?.[0] ?? 0) / composition.fps, minGapSeconds: speechGapMinSeconds, noiseDb: speechGapNoiseDb, signal}) : null;
+  let frameGlitches = null;
+  if (kind !== 'still' && !sourcePreview) {
+    onProgress?.({stage: 'frame_glitch_scan', progress: 0});
+    frameGlitches = await scanFrameGlitches(resolve(filePath), {fps: actual.measured.fps, expectedFrames: actual.measured.frames, signal});
+  }
   // Guard the entire scan, not just the metadata read, against file replacement.
   if ((await fileFingerprint(filePath)).slice('sha256:'.length) !== actual.fingerprint.sha256) {
     throw Object.assign(new Error('The export changed during its full-file checks.'), {code: 'EXPORT_CHANGED'});
   }
-  const report = {schemaVersion: 2, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
+  const report = {schemaVersion: 3, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
     ...actual, target, render, encoding: encodingFor(kind), sourceResolution: summarizeSourceResolution(project)};
-  report.checks = {framing, speechGaps, ...(timeline.captionOverrideReview ? {captionOverrides: timeline.captionOverrideReview} : {})};
+  report.checks = {framing, speechGaps, frameGlitches, ...(timeline.captionOverrideReview ? {captionOverrides: timeline.captionOverrideReview} : {})};
   const warnings = reviewWarnings(report);
   signal?.throwIfAborted();
   return reportSchema.parse({...report, status: statusFor(report.purpose, warnings), warnings, limitations: [...currentLimitations]});
@@ -308,7 +321,15 @@ function consistentReport(report) {
     !isDeepStrictEqual(encoding, encodingFor(render.kind))) return false;
   if (sourceResolution.visualAssetCount !== sourceResolution.unknownDimensionsCount +
     sourceResolution.sizes.reduce((total, size) => total + size.count, 0)) return false;
-  if (report.schemaVersion === 2) {
+  if (report.schemaVersion === 3) {
+    const g = report.checks.frameGlitches;
+    if (['final', 'preview'].includes(report.purpose) !== Boolean(g)) return false;
+    if (g && ((report.measured.frames !== null && g.decodedFrames !== report.measured.frames) ||
+      g.findings.length !== Math.min(100, g.totalFindings) || g.truncated !== (g.totalFindings > 100) ||
+      g.totalFindings > Math.max(0, g.decodedFrames - 2) || g.findings.some((f, i) =>
+        f.frame >= g.decodedFrames - 1 || f.seconds !== f.frame / report.measured.fps || (i && f.frame <= g.findings[i-1].frame)))) return false;
+  }
+  if (report.schemaVersion >= 2) {
     const {framing, speechGaps} = report.checks;
     const captions = report.checks.captionOverrides;
     if (captions && (captions.totalFindings < captions.findings.length ||
@@ -323,7 +344,7 @@ function consistentReport(report) {
   }
   const warnings = reviewWarnings(report);
   return report.status === statusFor(purpose, warnings) && isDeepStrictEqual(report.warnings, warnings) &&
-    isDeepStrictEqual(report.limitations, report.schemaVersion === 2 ? currentLimitations : limitations);
+    isDeepStrictEqual(report.limitations, report.schemaVersion >= 2 ? currentLimitations : limitations);
 }
 
 async function readQualityReport(sidecar, signal) {
@@ -365,6 +386,7 @@ export async function verifyExportQuality(filePath, {signal} = {}) {
   const report = {...saved, ...actual};
   const warnings = reviewWarnings(report);
   if (saved.schemaVersion === 1) warnings.push({code: 'EXPORT_REVIEW_CHECKS_MISSING', message: 'This older export report predates framing and full-file speech-gap checks. Export again to run them.'});
+  if (saved.schemaVersion === 2 && saved.purpose === 'final') warnings.push({code: 'FRAME_GLITCH_SCAN_MISSING', message: 'This report predates the isolated-frame scan. Run a new export for that check.'});
   if (!fingerprintMatches) warnings.push({code: 'EXPORT_FINGERPRINT_MISMATCH', message: 'The file bytes differ from the saved export.'});
   if (!metadataMatches) warnings.push({code: 'EXPORT_METADATA_MISMATCH', message: 'The measured media metadata differs from the saved report.'});
   const status = statusFor(report.purpose, warnings);

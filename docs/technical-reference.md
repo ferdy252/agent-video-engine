@@ -134,6 +134,8 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `color_preview` | `projectDir`, `expectedRevision`, optional output `frame`, `scale` |
 | `quality_preflight` | `projectDir`, `expectedRevision`, optional `draftId`, delivery `preset`, `fit`, `maxUpscale` (1.25), `offset`, `limit` (50, max 100) |
 | `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency`, delivery `preset`, `fit`, `minShortSide` (1080), `maxUpscale` (1.25), `speechGapMinSeconds` (0.8), `speechGapNoiseDb` (-40) |
+| `export_compare` | `projectDir`, `baselinePath` (approved MP4), `candidatePath`, optional `expectedChanges` of `{track, startSeconds, endSeconds}`. Returns a job. |
+| `export_frame_context` | `outputPath` (local encoded MP4), `frame` (zero-based interior frame). Returns a JPEG showing its previous, current and next frame. |
 | `export_verify` | Absolute `outputPath`; read-only fingerprint, metadata and quality-report check of the exact delivery file |
 | `export_subtitles` | `projectDir`, `expectedRevision`, `outputPath`, `format` of `srt` or `vtt` |
 | `export_timeline` | `projectDir`, `expectedRevision`, `outputPath`, optional `format` of `otio` |
@@ -157,6 +159,8 @@ Send the draft ID and current `expectedRevision` to `preview_render`. Use `draft
 ## Deliver and move a project
 
 `quality_preflight` measures raster enlargement before rendering. Use the same delivery `preset` and `fit` as the planned export, or inspect an unapplied `draftId`. It checks the current revision, reads actual source dimensions/rotation/pixel aspect, and leaves files and edits unchanged. Findings identify a clip/overlay, output range, worst frame, source time, enlargement factor and `preview_render` still arguments (`scale: 1`). Preserve the draft/preset context in that preview request. `offset`/`limit` paginate findings. Custom media and unsupported CSS receive explicit unassessed findings. The estimate follows the renderer's crop element, object-fit, positioned box and supported animated scale; it does not judge focus or infer occlusion by other layers.
+
+Edited moving previews and finals scan every encoded frame for isolated picture glitches. Use the reported frame index with `export_frame_context`. For scoped revisions, compare the approved and revised MP4s with `export_compare`. [Encoded-file review](delivery.md#inspect-a-single-frame-glitch)
 
 Every final export runs framing checks and a full encoded-audio speech-gap scan automatically before publishing the MP4/report pair. Inspect `quality.checks.framing` and `quality.checks.speechGaps` in the completed job. Gap times and padded `reviewStartSeconds`/`reviewEndSeconds` refer to the encoded file; `timelineStartSeconds`/`timelineEndSeconds` refer to the engine clock. Listen to those exact MP4 ranges before sharing. Fix unwanted gaps or record intentional pauses in the edit's review notes. The scan never deletes speech or changes the timeline. See [check methods and limitations](delivery.md#automatic-framing-and-speech-gap-checks).
 

@@ -37,6 +37,33 @@ These thresholds are review preferences, configurable on `export_render`; they n
 
 Framing reports return at most 100 findings in exports (paginate `quality_preflight` for more). Speech reports store up to 1,000 findings while continuing to scan/count the entire file. Truncation is explicit and keeps the export in `needs_review`; a truncated report is not a complete review checklist. Each speech finding provides an encoded-file time range and padded review range. Listen to flagged moments before sharing, fix unwanted pauses, and rerender/reverify after changes. Record intentional pauses separately without editing the machine-generated report. `verifiedFinal` remains false while warnings exist; it is a technical status, not a record of a human's editorial approval.
 
+## Inspect a single-frame glitch
+
+Edited moving previews and finals include `checks.frameGlitches` in version 3 reports. The editor decodes every frame of the MP4 and compares each interior frame with both neighbors at reduced resolution. A large one-frame jump followed by a return to a similar picture gets a zero-based frame number and a time in the encoded file. The scan stores the first 100 findings and counts the rest. An intentional flash may also be flagged. Subtle damage, long runs of damaged frames, and the first or last frame require visual review.
+
+Pass the exact MP4's `outputPath` and a finding's `frame` to `export_frame_context` to see the three encoded frames side by side. The CLI returns a base64 JPEG, and MCP displays the image. `export_verify` checks the file against its saved fingerprint and reports the saved findings. A matching older final with a version 2 report can still be identified and receives a warning that the frame scan was unavailable.
+
+## Compare an export with an approved version
+
+Call `export_compare` with two local MP4 paths. Relative paths resolve from `projectDir`. Use `job_get` with the returned job ID. A comparison reads the encoded files, including custom graphics and the final mix, and records both fingerprints. Start with the approved export as the baseline.
+
+```json
+{
+  "projectDir": "/absolute/path/to/project",
+  "baselinePath": "exports/approved.mp4",
+  "candidatePath": "exports/revised.mp4",
+  "expectedChanges": [
+    {"track": "picture", "startSeconds": 12.5, "endSeconds": 17.5}
+  ]
+}
+```
+
+In this example the entire soundtrack and all picture frames outside 12.5 through 17.5 seconds are checked. Each interval includes its start and excludes its end. Use `audio`, `picture`, or `both` for a range. An empty list checks the entire picture and sound. Frame timestamps are zero-based output times. Audio is checked at its sample boundaries in windows of up to 20 ms.
+
+The result includes `picture` and `audio` ranges in seconds, with up to 100 ranges per track and a total count. `comparedUnits` counts picture frames or audio sample frames respectively. `needs_review` identifies differences above the comparison thresholds. `no_unexpected_changes` indicates the assessed content stayed within those tolerances. `nothing_to_compare` means the supplied intervals covered all available content. `incompatible` identifies a change of dimensions, timing, or audio layout; compare exports that share the same timeline clock. Insertions or cuts that shift the rest of the timeline need separate review.
+
+The picture check measures RGB differences on a 108 × 192 grid, both across the whole frame and in smaller regions. The audio check compares decoded channel samples and tolerates small compression differences. Small details can be missed, and re-encoding or deliberate creative changes can trigger findings. Inspect flagged moments in both MP4s before approving a revision.
+
 ## Subtitle files
 
 Call `export_subtitles` with `format` of `srt` or `vtt` and the matching filename extension. `outputPath` can be absolute or relative to the project. The sidecar uses the same compiled cue boundaries as the edit and stops at the end of the video. Explicit output cues take precedence over pages grouped from the retimed source transcript. Both formats preserve multiline text and write times to the nearest millisecond. WebVTT escapes literal text markup. You can export a sidecar with burned-in captions turned off.
