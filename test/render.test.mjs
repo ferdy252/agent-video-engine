@@ -148,6 +148,20 @@ test('headless synthetic smoke renders source trim, caption, overlay and audio',
     await assert.rejects(readFile(`${competed}.quality.json`), {code: 'ENOENT'});
   });
 
+test('fractional moving previews encode the same even dimensions recorded in the quality report',
+  {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1'}, async t => {
+    const directory = await scratch(t);
+    const project = await createProject(path.join(directory, 'project'), {
+      settings: {width: 1080, height: 1920, fps: 30}, clips: [{id: 'pause', type: 'gap', duration: 1}],
+    });
+    for (const [scale, width, height] of [[.67, 724, 1286], [.44, 474, 844]]) {
+      const result = await renderProject(project, {kind: 'preview', scale, fromFrame: 0, toFrame: 2,
+        outputPath: path.join(directory, `preview-${scale}.mp4`)});
+      assert.deepEqual(result.quality.render.dimensions, {width, height});
+      assert.deepEqual([result.verification.width, result.verification.height, result.verification.frames], [width, height, 3]);
+    }
+  });
+
 test('custom Remotion motion renders headlessly and in-flight cancellation leaves no export',
   {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1', timeout: 120000}, async (t) => {
     const directory = await scratch(t);

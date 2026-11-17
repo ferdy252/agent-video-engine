@@ -1,6 +1,6 @@
 import {createServer} from 'node:http';
 import {createReadStream} from 'node:fs';
-import {access, link, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, writeFile} from 'node:fs/promises';
+import {access, link, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, stat, symlink, writeFile} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {basename, delimiter, dirname, extname, isAbsolute, join, resolve} from 'node:path';
 import {homedir} from 'node:os';
@@ -171,7 +171,7 @@ function frameNumber(value, fallback, duration, label) {
   return frame;
 }
 
-function outputDimensions(composition, scale, still) {
+function outputGeometry(composition, scale, still) {
   let {width, height} = composition;
   if (!still) {
     // H.264 requires even dimensions. Remotion reduces the unscaled dimension
@@ -181,7 +181,10 @@ function outputDimensions(composition, scale, still) {
   }
   const result = {width: Math.round(width * scale), height: Math.round(height * scale)};
   if (result.width < (still ? 1 : 2) || result.height < (still ? 1 : 2)) throw new Error('scale produces an output that is too small');
-  return result;
+  // The pinned renderer passes the unrounded products to its parallel H.264
+  // encoder. Its sequential encoder uses the actual rounded frame dimensions.
+  const fractional = !Number.isInteger(width * scale) || !Number.isInteger(height * scale);
+  return {dimensions: result, disallowParallelEncoding: !still && fractional};
 }
 
 async function verifyOutput(file, {kind, dimensions, frames, fps, signal}) {
@@ -253,17 +256,31 @@ async function floatAudioBinaries(work, signal) {
   return local;
 }
 
-async function verifyFloatMaster(file, {frames, fps, signal}) {
+async function floatMasterSamples(file, signal) {
   const {stdout} = await run('ffprobe', ['-v', 'error', '-show_entries',
-    'stream=codec_name,codec_type,sample_rate,duration:format=duration', '-of', 'json', file], {signal});
+    'stream=codec_name,codec_type,sample_rate,time_base,duration_ts', '-of', 'json', file], {signal});
   const probe = JSON.parse(stdout), audio = probe.streams?.find((stream) => stream.codec_type === 'audio');
-  if (audio?.codec_name !== 'pcm_f32le' || Number(audio.sample_rate) !== audioSampleRate) {
+  if (audio?.codec_name !== 'pcm_f32le' || Number(audio.sample_rate) !== audioSampleRate ||
+      audio.time_base !== '1/48000' || !Number.isSafeInteger(audio.duration_ts) || audio.duration_ts <= 0) {
     throw audioFailure('The full audio master must remain 48 kHz floating-point PCM before finishing.');
   }
-  const duration = Number(audio.duration ?? probe.format?.duration);
-  if (!Number.isFinite(duration) || Math.abs(duration - frames / fps) > 1 / audioSampleRate + 1e-6) {
-    throw audioFailure('The full audio master duration does not match the composition clock.');
+  return audio.duration_ts;
+}
+
+// Only generated, temporary stems pass through here. Keep the start and every
+// retained sample intact. A timing error larger than 1 ms needs investigation.
+export async function alignRenderedStem(file, expectedSamples, signal) {
+  const actual = await floatMasterSamples(file, signal);
+  if (actual === expectedSamples) return;
+  if (Math.abs(actual - expectedSamples) > audioSampleRate / 1000) {
+    throw audioFailure(`The full audio master duration does not match the composition clock: expected ${expectedSamples} samples, received ${actual}.`);
   }
+  const corrected = `${file}.aligned.wav`;
+  await run('ffmpeg', ['-v', 'error', '-n', '-i', file, '-map', '0:a:0', '-af',
+    actual > expectedSamples ? `atrim=end_sample=${expectedSamples}` : `apad=whole_len=${expectedSamples}`,
+    '-c:a', 'pcm_f32le', corrected], {signal});
+  if (await floatMasterSamples(corrected, signal) !== expectedSamples) throw audioFailure('Could not align the audio stem to the composition clock.');
+  await rename(corrected, file);
 }
 
 async function encodeFullMaster(master, output, signal) {
@@ -296,6 +313,7 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
   partial, kind, settings, voice, signal, onProgress}) {
   const raw = join(work, 'master-raw.wav'), finished = join(work, 'master-finished.wav');
   const binariesDirectory = await floatAudioBinaries(work, signal);
+  const expectedSamples = Math.round(composition.durationInFrames * audioSampleRate / composition.fps);
   report(onProgress, {stage: 'audio_master', progress: 0});
   let mix;
   const renderStem = async (outputLocation, role) => {
@@ -306,7 +324,7 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
       frameRange: [0, composition.durationInFrames - 1],
       onProgress: (update) => report(onProgress, {stage: role ? `audio_${role}` : 'audio_master', ...update})});
     checkAbort(signal);
-    await verifyFloatMaster(outputLocation, {frames: composition.durationInFrames, fps: composition.fps, signal});
+    await alignRenderedStem(outputLocation, expectedSamples, signal);
   };
   if (needsStemMix(settings)) {
     const stems = {};
@@ -316,9 +334,9 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
     }
     const {outputPath: temporaryMixPath, ...mixReport} = await mixAudioStems(stems, raw, settings, {signal, onProgress});
     mix = mixReport;
+    if (await floatMasterSamples(raw, signal) !== expectedSamples) throw audioFailure('The mixed master duration does not match the composition clock.');
   } else await renderStem(raw);
   checkAbort(signal);
-  await verifyFloatMaster(raw, {frames: composition.durationInFrames, fps: composition.fps, signal});
   const masterReport = settings.enabled ? await finishAudioMaster(raw, finished, settings, {signal,
     onProgress: (update) => report(onProgress, {...update, stage: 'audio_finish'})}) : null;
   checkAbort(signal);
@@ -493,9 +511,9 @@ export async function renderProject(project, options = {}) {
     if (customMode === 'layer' && ['fps', 'width', 'height', 'durationInFrames'].some((key) => composition[key] !== timeline[key])) {
       throw new Error('Custom layer changed the engine composition clock. Layers must use the supplied timeline.');
     }
-    const dimensions = outputDimensions(composition, scale, kind === 'still');
+    const {dimensions, disallowParallelEncoding} = outputGeometry(composition, scale, kind === 'still');
     const common = {serveUrl, composition, inputProps, puppeteerInstance: browser,
-      browserExecutable, chromeMode: 'chrome-for-testing', cancelSignal, scale, overwrite: false, logLevel: 'error'};
+      browserExecutable, chromeMode: 'chrome-for-testing', cancelSignal, scale, disallowParallelEncoding, overwrite: false, logLevel: 'error'};
     let frame, frameRange;
     if (kind === 'still') {
       frame = frameNumber(options.frame, 0, composition.durationInFrames, 'frame');

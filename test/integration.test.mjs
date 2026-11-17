@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, writeFile, readFile, mkdir, rm, access} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, mkdir, rm, access, stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -11,7 +11,7 @@ import {promisify} from 'node:util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {run, fileFingerprint, toolEnv} from '../src/media.mjs';
-import {normalizeTranscript} from '../src/transcribe.mjs';
+import {normalizeTranscript, transcribeAsset} from '../src/transcribe.mjs';
 import {getJob, jobDir, saveJob} from '../src/jobs.mjs';
 import {bundle} from '../src/bundle.mjs';
 
@@ -41,6 +41,37 @@ test('native point-timed words survive normalization and fingerprints use file c
     assert.throws(() => normalizeTranscript([{text: 'bad', start: 0.8, end: 1.3}], 'camera', {duration: 1}), /beyond/);
     assert.throws(() => normalizeTranscript([{text: 'bad', start: 2, end: 1}], 'camera'), /timing/);
   } finally { await rm(dir, {recursive: true, force: true}); }
+});
+
+test('existing Whisper caches recover measured word boundaries without decoding or rewriting the evidence', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'engine-transcript-cache-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const source = join(dir, 'source'), modelPath = join(dir, 'model');
+  await writeFile(source, 'fixture source');
+  await writeFile(modelPath, 'fixture model');
+  const model = await stat(modelPath);
+  const key = createHash('sha256').update(JSON.stringify([await fileFingerprint(source), modelPath, model.size, model.mtimeMs, 'en', 1])).digest('hex');
+  const cache = join(dir, '.engine/transcripts', key);
+  await mkdir(cache, {recursive: true});
+  const token = (text, from, to) => ({text, offsets: {from, to}});
+  const raw = JSON.stringify({transcription: [
+    {...token(' finished.', 2000, 22000), tokens: [token('[_BEG_]', 2000, 2000), token(' finish', 2050, 2350),
+      token('ed', 2350, 2550), token('.', 6000, 22000), token('[_TT_1100]', 22000, 22000)]},
+    {...token(' next', 23000, 23500), tokens: [token(' wrong', 23000, 23500)]},
+    {...token(' again', 24000, 30000), tokens: [token(' again', 24000, 30000)]},
+  ]});
+  const legacy = JSON.stringify({words: [{id: 'w0', text: 'finished.', start: 2, end: 22}]});
+  await writeFile(join(cache, 'raw-whisper.json'), raw);
+  await writeFile(join(cache, 'transcript.json'), legacy);
+  const asset = {id: 'source', type: 'audio', duration: 30, path: source};
+  const upgraded = await transcribeAsset(dir, asset, {modelPath});
+  assert.equal(upgraded.cached, true);
+  assert.deepEqual(upgraded.transcript.words[0], {id: 'w0', text: 'finished.', start: 2.05, end: 2.55});
+  assert.deepEqual(upgraded.transcript.timingReviewWordIds, ['w1', 'w2']);
+  assert.deepEqual(normalizeTranscript(upgraded.transcript, asset.id), upgraded.transcript);
+  assert.deepEqual(await transcribeAsset(dir, asset, {modelPath}), upgraded);
+  assert.equal(await readFile(join(cache, 'transcript.json'), 'utf8'), legacy);
+  assert.equal(await readFile(join(cache, 'raw-whisper.json'), 'utf8'), raw);
 });
 
 test('durable job reads preserve completed results and detect a stopped worker', async () => {

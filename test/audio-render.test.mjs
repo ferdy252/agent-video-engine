@@ -7,9 +7,31 @@ import {join} from 'node:path';
 import {promisify} from 'node:util';
 import {createProject} from '../src/project.mjs';
 import {probeAsset, run} from '../src/media.mjs';
-import {renderProject} from '../src/render.mjs';
+import {alignRenderedStem, renderProject} from '../src/render.mjs';
 
 const exec = promisify(execFile);
+
+test('small stem rounding errors are repaired at the tail and larger timing errors abort', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'stem-clock-'));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const expected = 1600;
+  for (const delta of [-16, 16, 1600]) {
+    const file = join(directory, `stem-${delta}.wav`);
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=500:sample_rate=48000',
+      '-af', `atrim=end_sample=${expected + delta}`, '-c:a', 'pcm_f32le', file]);
+    const samples = async () => (await exec('ffmpeg', ['-v', 'error', '-i', file, '-f', 'f32le', '-'], {encoding: 'buffer'})).stdout;
+    const before = await samples();
+    if (delta === 1600) {
+      await assert.rejects(alignRenderedStem(file, expected), {code: 'AUDIO_VERIFICATION_FAILED'});
+      assert.deepEqual(await samples(), before);
+    } else {
+      await alignRenderedStem(file, expected);
+      const bytes = expected * 4;
+      const wanted = delta > 0 ? before.subarray(0, bytes) : Buffer.concat([before, Buffer.alloc(bytes - before.length)]);
+      assert.deepEqual(await samples(), wanted);
+    }
+  }
+});
 
 async function crest(file) {
   const {stdout} = await exec('ffmpeg', ['-v', 'error', '-ss', '0.5', '-i', file,

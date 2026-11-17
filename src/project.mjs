@@ -5,6 +5,7 @@ import path from 'node:path';
 import {resolveAudioSettings, resolveClipAudio, validateAudioSettings, validateClipAudio, mergeAudioSettings} from './audio-settings.mjs';
 import {applyColorPatch, validateColorSettings} from './color-settings.mjs';
 import {fileFingerprint} from './media.mjs';
+import {uncertainWordTiming} from './transcribe.mjs';
 import {validateVisual, validateSequence, validateCaptionCues, GRAPHIC_PRESETS} from './edit-controls.mjs';
 import {prepareCaptionOverrides, validateCaptionOverrides} from './caption-overrides.mjs';
 
@@ -474,10 +475,12 @@ function applyOperation(project, operation) {
       const transcript = project.transcripts.find((entry) => entry.assetId === operation.assetId);
       if (!transcript) fail(`No transcript for asset: ${operation.assetId}.`, 'TRANSCRIPT_NOT_FOUND');
       const byId = new Map(transcript.words.map((word) => [word.id, word]));
+      const flagged = new Set(transcript.timingReviewWordIds);
       for (const id of new Set(operation.wordIds)) {
         const word = byId.get(id);
         if (!word) fail(`Unknown word: ${id}.`, 'WORD_NOT_FOUND');
         if (word.start === word.end) fail(`Word ${id} has a point timestamp and no measured speech interval. Inspect the source audio and set a verified source range before deleting it.`, 'WORD_TIMING_UNCERTAIN');
+        if (flagged.has(id) || uncertainWordTiming(word)) fail(`Word ${id} has uncertain speech boundaries. Refresh the transcript from raw-whisper.json or preview the source and cut a verified range.`, 'WORD_TIMING_UNCERTAIN');
         cutSource(project, operation.assetId, word.start, word.end);
       }
       break;

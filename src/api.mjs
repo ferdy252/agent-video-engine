@@ -7,7 +7,7 @@ import {stageDraft, inspectDraft, listDrafts, applyDraft, deleteDraft, comparePr
 import {GRAPHIC_PRESETS, MOTION_LIMITS} from './edit-controls.mjs';
 import {compileTimeline} from './timeline.mjs';
 import {probeAsset, doctor, assertAssets} from './media.mjs';
-import {normalizeTranscript} from './transcribe.mjs';
+import {normalizeTranscript, uncertainWordTiming} from './transcribe.mjs';
 import {startJob, startBundleOpen, getJob, cancelJob, retryJob, listJobs} from './jobs.mjs';
 import {importLegacyProject} from './import-legacy.mjs';
 import {AUDIO_LIMITS, resolveAudioSettings} from './audio-settings.mjs';
@@ -88,7 +88,8 @@ const operationSchema = z.discriminatedUnion('type', [
   z.object({type: z.literal('trim_clip'), clipId: z.string(), sourceStart: z.number().nonnegative(), sourceEnd: z.number().positive()}).strict(),
   z.object({type: z.literal('reorder_clips'), clipIds: z.array(z.string())}).strict(),
   z.object({type: z.literal('delete_source_range'), assetId: z.string(), start: z.number().nonnegative(), end: z.number().positive()}).strict(),
-  z.object({type: z.literal('delete_words'), assetId: z.string(), wordIds: z.array(z.string()).min(1)}).strict(),
+  z.object({type: z.literal('delete_words'), assetId: z.string(), wordIds: z.array(z.string()).min(1)
+    .describe('Source word IDs with measured speech boundaries. For IDs marked for timing review, preview the source and use delete_source_range with verified bounds.')}).strict(),
   z.object({type: z.literal('upsert_overlay'), overlay: overlaySchema}).strict(),
   z.object({type: z.literal('remove_overlay'), overlayId: z.string()}).strict(),
   z.object({type: z.literal('set_captions'), patch: captionPatch}).strict(),
@@ -192,7 +193,7 @@ export const toolDefinitions = [
     schema: {projectDir, indexId: z.string(), query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
-  {name: 'edit_apply', description: 'Apply a complete validated batch as one revision. Timeline controls: set_clips, insert_clip, replace_clip, insert_gap, set_gap, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words. Set an incoming crossfade/dip/wipe with set_transition (overlaps existing retained ranges and shortens output). set_clip_visual controls crop, focus, fit, position and timed motion keyframes. set_clip_audio controls independent source bounds/offset, gain, role, fades and volume envelope; patch:null restores linked sound. set_audio controls voice/music/effects gains, optional music ducking, voice noise reduction and automatic loudness. upsert_overlay adds media or reusable title/lower_third/callout text. set_caption_overrides replaces display text or line/page breaks by source word IDs while retaining automatic timing and highlighting through edits; it applies to every use of those source words and leaves transcripts/audio unchanged. Pass overrides:[] to clear. Fixed set_caption_cues take precedence; cues:null returns to automatic pages. Interrupted grouped corrections return captionOverrideReview findings. Also supports remove_overlay, set_captions, set_settings, set_custom, set_asset_color and set_clip_color. Use draft_stage for a proposal preview. Invalid or stale batches leave the project unchanged. Originals are preserved.',
+  {name: 'edit_apply', description: 'Apply a complete validated batch as one revision. Timeline controls: set_clips, insert_clip, replace_clip, insert_gap, set_gap, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words. Word cuts require measured boundaries. Preview flagged words and use a verified source range. Set an incoming crossfade/dip/wipe with set_transition (overlaps existing retained ranges and shortens output). set_clip_visual controls crop, focus, fit, position and timed motion keyframes. set_clip_audio controls independent source bounds/offset, gain, role, fades and volume envelope; patch:null restores linked sound. set_audio controls voice/music/effects gains, optional music ducking, voice noise reduction and automatic loudness. upsert_overlay adds media or reusable title/lower_third/callout text. set_caption_overrides replaces display text or line/page breaks by source word IDs while retaining automatic timing and highlighting through edits; it applies to every use of those source words and leaves transcripts/audio unchanged. Pass overrides:[] to clear. Fixed set_caption_cues take precedence; cues:null returns to automatic pages. Interrupted grouped corrections return captionOverrideReview findings. Also supports remove_overlay, set_captions, set_settings, set_custom, set_asset_color and set_clip_color. Use draft_stage for a proposal preview. Invalid or stale batches leave the project unchanged. Originals are preserved.',
     schema: {projectDir, expectedRevision, operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: async ({projectDir: dir, ...request}) => {const project = await applyOperations(dir, request); const timeline = compileTimeline(project);
       return {revision: project.revision, clips: project.clips, durationInFrames: timeline.durationInFrames,
@@ -201,14 +202,16 @@ export const toolDefinitions = [
   {name: 'revision_restore', description: 'Restore a saved revision as a new revision. Keeps history and original footage.',
     schema: {projectDir, expectedRevision, revision: z.number().int().nonnegative()}, annotations: edit,
     run: ({projectDir: dir, ...request}) => restoreRevision(dir, request)},
-  {name: 'transcript_import', description: 'Import source-timed transcript words from local JSON, including a word array or native speech-recognition output. Reuses existing transcripts without retranscription.',
+  {name: 'transcript_import', description: 'Import source-timed transcript words from local JSON. Native whisper.cpp tokens provide measured speech boundaries. Returns IDs that need timing review before a word-based cut.',
     schema: {projectDir, expectedRevision, assetId: z.string(), path: z.string().min(1)}, annotations: edit,
     run: async ({projectDir: dir, expectedRevision: revision, assetId, path}) => {
-      const transcript = normalizeTranscript(JSON.parse(await readFile(resolve(path), 'utf8')), assetId);
+      const current = await loadProject(dir);
+      const duration = current.assets.find(asset => asset.id === assetId)?.duration;
+      const transcript = normalizeTranscript(JSON.parse(await readFile(resolve(path), 'utf8')), assetId, {duration});
       const project = await applyOperations(dir, {expectedRevision: revision, operations: [{type: 'set_transcript', transcript}]});
-      return {revision: project.revision, wordCount: transcript.words.length};
+      return {revision: project.revision, wordCount: transcript.words.length, timingReviewWordIds: transcript.timingReviewWordIds ?? []};
     }},
-  {name: 'transcript_search', description: 'Read or search source transcript words with stable word IDs and source times. Use empty query for paginated reading; review footage before judging retakes.',
+  {name: 'transcript_search', description: 'Read or search source transcript words with stable word IDs and source times. timingReviewWordIds lists words on this page that need a source timing check before cutting. Use empty query for paginated reading; review footage before judging retakes.',
     schema: {projectDir, assetId: z.string(), query: z.string().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(300).optional()}, annotations: ro,
     run: async ({projectDir: dir, assetId, query = '', offset = 0, limit = 100}) => {
       const project = await loadProject(dir), transcript = project.transcripts.find(item => item.assetId === assetId);
@@ -217,7 +220,9 @@ export const toolDefinitions = [
       const phraseLength = Math.max(1, q.split(/\s+/).length);
       const hits = q ? words.flatMap((word, index) => words.slice(index, index + phraseLength).map(item => item.text).join(' ').toLocaleLowerCase().includes(q)
         ? [{...word, context: words.slice(Math.max(0, index - 4), index + phraseLength + 4)}] : []) : words;
-      return {revision: project.revision, assetId, language: transcript.language, total: hits.length, offset, words: hits.slice(offset, offset + limit)};
+      const page = hits.slice(offset, offset + limit), flagged = new Set(transcript.timingReviewWordIds);
+      return {revision: project.revision, assetId, language: transcript.language, total: hits.length, offset, words: page,
+        timingReviewWordIds: page.filter(word => flagged.has(word.id) || uncertainWordTiming(word)).map(word => word.id)};
     }},
   {name: 'transcribe', description: 'Start cached, local word transcription with whisper.cpp. Returns a durable job ID. Never uploads footage or downloads models. Applies results only if the project revision is unchanged.',
     schema: {projectDir, expectedRevision, assetId: z.string(), modelPath: z.string().optional(), language: z.string().default('en')}, annotations: edit,

@@ -130,7 +130,7 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `revision_restore` | `projectDir`, `expectedRevision`, target `revision` |
 | `graphic_presets` | List the available text graphic styles |
 | `source_preview` | `projectDir`, `expectedRevision`, `assetId`, optional `kind`, `sourceStart`, `sourceEnd`, `scale` |
-| `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale`, `draftId` or `revision`, delivery `preset` and `fit` |
+| `preview_render` | `projectDir`, `expectedRevision`, optional `kind`, `frame`, `fromFrame`, `toFrame`, `scale`, `draftId` or `revision`, delivery `preset` and `fit`. Moving previews accept fractional scales and report the encoded, even pixel dimensions. |
 | `color_preview` | `projectDir`, `expectedRevision`, optional output `frame`, `scale` |
 | `quality_preflight` | `projectDir`, `expectedRevision`, optional `draftId`, delivery `preset`, `fit`, `maxUpscale` (1.25), `offset`, `limit` (50, max 100) |
 | `export_render` | `projectDir`, `expectedRevision`, optional `outputPath`, `concurrency`, delivery `preset`, `fit`, `minShortSide` (1080), `maxUpscale` (1.25), `speechGapMinSeconds` (0.8), `speechGapNoiseDb` (-40) |
@@ -267,7 +267,7 @@ Automatic take matching measures main clips assigned to `voice` and applies a bo
 
 Moving previews and exports that use finishing or role-based stem mixing render the complete composition's audio first. Floating-point intermediates preserve mixing headroom. With finishing enabled, one constant gain approaches the requested loudness while reserving peak headroom. Short previews use a range from this complete master. If an exceptional AAC slice boundary exceeds the ceiling, rendering stops with an adjustment recommendation. Still images skip audio processing, and `source_preview` plays the original audio without edit processing.
 
-Read the completed render job's `result.audio` for role and source-span gains. When enabled, `mix` describes ducking and denoise, and `master`, `encoded` and `peakSafety` describe finishing and the verified output. Peak protection and boost limits can make a target unreachable. Listen to the output as well as reading these measurements. The worker deletes temporary audio masters after rendering or cancellation.
+Read the completed render job's `result.audio` for role and source-span gains. When enabled, `mix` describes ducking and denoise, and `master`, `encoded` and `peakSafety` describe finishing and the verified output. The engine trims or pads the tail of a temporary stem when renderer rounding puts it within 1 ms of the frame clock. Larger discrepancies stop the render. Peak protection and boost limits can make a target unreachable. Listen to the output as well as reading these measurements. The worker deletes temporary audio masters after rendering or cancellation.
 
 Finishing, ducking and denoise support the built-in composition and custom `mode: "layer"`. For independent compositions, mix audio in the composition or adapt it to layer mode. The floating-point render bridge uses a POSIX shell and installed FFmpeg and is verified on macOS. Windows reports an unsupported-platform error for these processes.
 
@@ -424,7 +424,9 @@ The legacy project import tool is now `project_import_legacy`, and its JavaScrip
 
 `project_import_legacy` creates a new engine project from a version-1 `.aive`. It resolves a relative `videoPath` against the original project directory, preserves the full source transcript and keeps everything outside the union of explicit `deletedRanges`. Untranscribed lead-in, gaps and trailing footage survive unless explicitly cut. The original `.aive` and media remain unchanged.
 
-Local transcription retains raw output and normalized words under `.engine/transcripts/`. Temporary extracted audio is removed. Small decoder overshoots can be bounded to the actual media duration and marked for timing review, with raw timings retained.
+For native whisper.cpp output, the first and last measured speech tokens define each word's edit range. The displayed word keeps its punctuation. The editor flags point timestamps, inconsistent token evidence, source-end corrections, and single words spanning more than three seconds. `transcript_search` reports flagged IDs in `timingReviewWordIds`. A `delete_words` batch that includes an uncertain word stops before saving. Preview the original and use `delete_source_range` with verified boundaries when needed.
+
+Local transcription retains raw output and normalized words under `.engine/transcripts/`. Running `transcribe` again on a matching older cache rebuilds word timings from the saved raw output and keeps the original cache files. It applies the result through the usual project revision check. Older saved transcripts also receive the point and long-word checks before a cut. Temporary extracted audio is removed.
 
 ## Custom motion on the shared timeline
 

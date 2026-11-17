@@ -36,6 +36,25 @@ test('word deletion removes only explicit word time and retimes captions after c
   assert.equal(await readFile(media, 'utf8'), 'source bytes remain untouched');
 });
 
+test('saved long or flagged word timings cannot delete neighboring footage', async t => {
+  const {projectDir} = await fixture(t, {transcripts: [{assetId: 'a', language: 'en', timingReviewWordIds: ['flagged'], words: [
+    {id: 'safe', text: 'Say', start: .2, end: .5}, {id: 'long', text: 'again.', start: 1, end: 7},
+    {id: 'flagged', text: 'yes', start: 8, end: 8.5},
+  ]}]});
+  for (const id of ['long', 'flagged']) {
+    await assert.rejects(applyOperations(projectDir, {expectedRevision: 0, operations: [
+      {type: 'delete_words', assetId: 'a', wordIds: ['safe', id]},
+    ]}), {code: 'WORD_TIMING_UNCERTAIN'});
+  }
+  const original = await loadProject(projectDir);
+  assert.equal(original.revision, 0);
+  assert.deepEqual(original.clips.map(c => [c.sourceStart, c.sourceEnd]), [[0, 10]]);
+  const verified = await applyOperations(projectDir, {expectedRevision: 0, operations: [
+    {type: 'delete_source_range', assetId: 'a', start: 1.1, end: 1.6},
+  ]});
+  assert.deepEqual(verified.clips.map(c => [c.sourceStart, c.sourceEnd]), [[0, 1.1], [1.6, 10]]);
+});
+
 test('cumulative frame rounding avoids drift across many fractional-source-FPS cuts', async (t) => {
   const clips = Array.from({length: 1000}, (_, index) => ({id: `c${index}`, assetId: 'a', sourceStart: index * 2, sourceEnd: index * 2 + 1.013}));
   const {project} = await fixture(t, {clips});
