@@ -8,6 +8,7 @@ import {fileFingerprint} from './media.mjs';
 import {uncertainWordTiming} from './transcribe.mjs';
 import {validateVisual, validateSequence, validateCaptionCues, GRAPHIC_PRESETS} from './edit-controls.mjs';
 import {prepareCaptionOverrides, validateCaptionOverrides} from './caption-overrides.mjs';
+import {retimeWords} from './timeline.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
 
@@ -356,7 +357,31 @@ function findClip(project, id) {
   if (index < 0) fail(`Unknown clip: ${id}.`, 'CLIP_NOT_FOUND');
   return index;
 }
-function cutSource(project, assetId, start, end) {
+// Track only the scoped anchors that existed when this occurrence was split.
+function trackSplitAnchors(project, leftId, rightId, splitAnchors) {
+  for (const {anchor} of project.overlays) {
+    if (!anchor?.clipId) continue;
+    const candidates = splitAnchors.get(anchor);
+    if (anchor.clipId !== leftId && !candidates?.has(leftId)) continue;
+    if (candidates) candidates.add(rightId);
+    else splitAnchors.set(anchor, new Set([leftId, rightId]));
+  }
+}
+
+function resolveSplitAnchors(project, splitAnchors) {
+  const pending = project.overlays.map(overlay => overlay.anchor).filter(anchor => splitAnchors.has(anchor));
+  if (!pending.length) return;
+  const words = retimeWords(project);
+  for (const anchor of pending) {
+    const fragments = splitAnchors.get(anchor);
+    const retained = words.filter(word => word.assetId === anchor.assetId && word.id === anchor.wordId && fragments.has(word.clipId));
+    // A word crossing the split can survive in both fragments. Prefer the
+    // original attachment when it still exists, even if clips were reordered.
+    if (retained.length && !retained.some(word => word.clipId === anchor.clipId)) anchor.clipId = retained[0].clipId;
+  }
+}
+
+function cutSource(project, assetId, start, end, splitAnchors) {
   const asset = project.assets.find((entry) => entry.id === assetId);
   if (!asset) fail(`Unknown asset: ${assetId}.`, 'ASSET_NOT_FOUND');
   sourceBounds(asset, start, end, 'delete range');
@@ -365,6 +390,7 @@ function cutSource(project, assetId, start, end) {
     const retained = [];
     if (start > clip.sourceStart) retained.push(sliceClip(clip, clip.sourceStart, start));
     if (end < clip.sourceEnd) retained.push({...sliceClip(clip, end, clip.sourceEnd), id: retained.length ? `${clip.id}-${randomUUID()}` : clip.id});
+    if (retained.length === 2) trackSplitAnchors(project, retained[0].id, retained[1].id, splitAnchors);
     return retained;
   });
 }
@@ -399,7 +425,7 @@ function sliceClip(clip, start, end) {
   }
   return result;
 }
-function applyOperation(project, operation) {
+function applyOperation(project, operation, splitAnchors) {
   object(operation, 'operation');
   const type = operation.type ?? operation.op;
   switch (type) {
@@ -451,8 +477,10 @@ function applyOperation(project, operation) {
       const clip = project.clips[index];
       number(operation.sourceTime, 'sourceTime');
       if (operation.sourceTime <= clip.sourceStart || operation.sourceTime >= clip.sourceEnd) fail('Split must be inside the clip.');
+      const rightId = operation.newClipId ?? `${clip.id}-${randomUUID()}`;
       project.clips.splice(index, 1, sliceClip(clip, clip.sourceStart, operation.sourceTime),
-        {...sliceClip(clip, operation.sourceTime, clip.sourceEnd), id: operation.newClipId ?? `${clip.id}-${randomUUID()}`});
+        {...sliceClip(clip, operation.sourceTime, clip.sourceEnd), id: rightId});
+      trackSplitAnchors(project, clip.id, rightId, splitAnchors);
       break;
     }
     case 'remove_clip': project.clips.splice(findClip(project, operation.clipId), 1); break;
@@ -469,7 +497,7 @@ function applyOperation(project, operation) {
       project.clips = operation.clipIds.map((id) => byId.get(id));
       break;
     }
-    case 'delete_source_range': cutSource(project, operation.assetId, operation.start, operation.end); break;
+    case 'delete_source_range': cutSource(project, operation.assetId, operation.start, operation.end, splitAnchors); break;
     case 'delete_words': {
       array(operation.wordIds, 'wordIds');
       const transcript = project.transcripts.find((entry) => entry.assetId === operation.assetId);
@@ -481,7 +509,7 @@ function applyOperation(project, operation) {
         if (!word) fail(`Unknown word: ${id}.`, 'WORD_NOT_FOUND');
         if (word.start === word.end) fail(`Word ${id} has a point timestamp and no measured speech interval. Inspect the source audio and set a verified source range before deleting it.`, 'WORD_TIMING_UNCERTAIN');
         if (flagged.has(id) || uncertainWordTiming(word)) fail(`Word ${id} has uncertain speech boundaries. Refresh the transcript from raw-whisper.json or preview the source and cut a verified range.`, 'WORD_TIMING_UNCERTAIN');
-        cutSource(project, operation.assetId, word.start, word.end);
+        cutSource(project, operation.assetId, word.start, word.end, splitAnchors);
       }
       break;
     }
@@ -562,7 +590,12 @@ export function prepareOperations(current, operations) {
   array(operations, 'operations');
   if (!operations.length || operations.length > 1000) fail('Supply 1 to 1000 operations.');
   const project = clone(current);
-  for (const operation of operations) applyOperation(project, operation);
+  const splitAnchors = new Map();
+  for (const operation of operations) applyOperation(project, operation, splitAnchors);
+  if (splitAnchors.size) {
+    try {resolveSplitAnchors(project, splitAnchors);}
+    catch (error) {validateProject(project); throw error;}
+  }
   validateProject(project);
   return project;
 }

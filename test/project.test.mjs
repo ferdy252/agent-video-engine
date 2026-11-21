@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp, writeFile, readFile, rm} from 'node:fs/promises';
+import {applyDraft, inspectDraft, stageDraft} from '../src/drafts.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import {createProject, loadProject, applyOperations, restoreRevision, listRevisions, compileTimeline, retimeWords} from '../src/project.mjs';
@@ -188,6 +189,53 @@ test('word-anchored overlays follow cuts and disappear when their source speech 
   ]});
   assert.deepEqual(compileTimeline(removed).overlays, []);
   assert.equal(removed.overlays.length, 1);
+});
+
+test('occurrence-scoped titles follow the same retained speech through splits and draft cuts', async t => {
+  const projectOptions = {
+    clips: [{id: 'first', assetId: 'a', sourceStart: 5, sourceEnd: 8},
+      {id: 'second', assetId: 'a', sourceStart: 0, sourceEnd: 10}],
+    overlays: [{id: 'title', type: 'text', text: 'Demo', start: 0, end: 1,
+      anchor: {assetId: 'a', wordId: 'w3', clipId: 'second'}}],
+  };
+  const {projectDir, project} = await fixture(t, projectOptions);
+  assert.equal(compileTimeline(project).overlays[0].start, 9);
+  const split = await applyOperations(projectDir, {expectedRevision: 0, operations: [
+    {type: 'split_clip', clipId: 'second', sourceTime: 2, newClipId: 'middle'},
+    {type: 'split_clip', clipId: 'middle', sourceTime: 3, newClipId: 'right'},
+  ]});
+  assert.equal(split.overlays[0].anchor.clipId, 'right');
+  assert.equal(compileTimeline(split).overlays[0].start, 9);
+  const restored = await restoreRevision(projectDir, {expectedRevision: 1, revision: 0});
+  const staged = await stageDraft(projectDir, {expectedRevision: restored.revision, operations: [
+    {type: 'delete_words', assetId: 'a', wordIds: ['w2']},
+  ]});
+  const {timeline} = await inspectDraft(projectDir, staged.id, {includeTimeline: true});
+  assert.equal(timeline.overlays[0].start, 8);
+  const applied = await applyDraft(projectDir, {expectedRevision: restored.revision, draftId: staged.id});
+  assert.deepEqual(compileTimeline(applied).overlays, timeline.overlays);
+  const withoutOccurrence = await applyOperations(projectDir, {expectedRevision: applied.revision, operations: [
+    {type: 'remove_clip', clipId: applied.overlays[0].anchor.clipId},
+  ]});
+  assert.equal(compileTimeline(withoutOccurrence).captions.some(word => word.id === 'w3'), true);
+  assert.deepEqual(compileTimeline(withoutOccurrence).overlays, []);
+});
+
+test('a split resolves scoped titles against retained replacement voice, including boundary points', async t => {
+  const {projectDir, media} = await fixture(t);
+  const words = [{id: 'crossing', text: 'Across', start: 9.8, end: 10.2},
+    {id: 'point', text: 'Here', start: 10, end: 10}];
+  const overlay = word => ({id: word.id, type: 'text', text: word.text, start: 0, end: 1,
+    anchor: {assetId: 'voice', wordId: word.id, clipId: 'c'}});
+  const edited = await applyOperations(projectDir, {expectedRevision: 0, operations: [
+    {type: 'add_asset', asset: {id: 'voice', path: media, type: 'audio', duration: 20}},
+    {type: 'set_transcript', transcript: {assetId: 'voice', language: 'en', words}},
+    {type: 'set_clip_audio', clipId: 'c', patch: {assetId: 'voice', sourceStart: 7, sourceEnd: 15, offset: 1}},
+    ...words.map(word => ({type: 'upsert_overlay', overlay: overlay(word)})),
+    {type: 'split_clip', clipId: 'c', sourceTime: 4, newClipId: 'right'},
+  ]});
+  assert.deepEqual(edited.overlays.map(o => o.anchor.clipId), ['c', 'right']);
+  assert.deepEqual(compileTimeline(edited).overlays.map(o => o.from), [114, 120]);
 });
 
 test('reused words have deterministic first-occurrence anchors and optional clip-specific attachments', async (t) => {
