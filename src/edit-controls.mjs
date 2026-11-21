@@ -72,7 +72,10 @@ export function validateSequence(clips, fps) {
     }
     if (clip.transition) {
       object(clip.transition, 'transition');
-      if (!['crossfade', 'dip', 'wipe'].includes(clip.transition.type)) fail('Unknown transition type.');
+      if (!['crossfade', 'dip', 'wipe', 'slide'].includes(clip.transition.type)) fail('Unknown transition type.');
+      if (clip.transition.motionBlur !== undefined && (clip.transition.type !== 'slide' || typeof clip.transition.motionBlur !== 'boolean')) {
+        fail('transition.motionBlur must be a boolean on a slide transition.');
+      }
       finite(clip.transition.duration, 'transition.duration', 1 / fps, 30);
       if (!previous || previous.type === 'gap') fail('A transition needs an adjacent preceding media clip.');
       if (Math.round(clip.transition.duration * fps) < 2) fail('Transitions need at least two frames.');

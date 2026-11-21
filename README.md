@@ -8,7 +8,7 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 
 - Find possible retakes inside one recording and preview the matching source ranges.
 - Stage a draft, preview the exact changes and apply it as a saved revision. Compare or restore earlier versions.
-- Cut by transcript words, insert pauses and blend neighboring clips. Start sound before the picture changes or let it continue afterward.
+- Cut by transcript words, insert pauses and blend neighboring clips. Add a slide transition with optional motion blur. Start sound before the picture changes or let it continue afterward.
 - Reframe footage, adjust its color and animate changes in position, size or opacity.
 - Balance voice, music and effects. Lower music under speech and reduce mild background noise.
 - Correct caption words and line breaks while keeping them synced through later cuts, with word highlighting intact. Add titles, name labels and callouts, or attach graphics to spoken words.

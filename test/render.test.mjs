@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFile} from 'node:child_process';
 import {writeFileSync} from 'node:fs';
 import {promisify} from 'node:util';
-import {createProject} from '../src/project.mjs';
+import {createProject, prepareOperations} from '../src/project.mjs';
 import {renderProject, startAssetServer} from '../src/render.mjs';
 import {bundle} from '../src/bundle.mjs';
 
@@ -88,7 +88,7 @@ test('existing outputs and original source assets cannot be replaced', async (t)
   assert.ok(!(await readdir(directory)).some((name) => name.startsWith('.agent-video-render-')));
 });
 
-test('custom layers must declare the same pinned Remotion runtime as the engine', async (t) => {
+test('custom layers reject unverified project runtime versions', async (t) => {
   const directory = await scratch(t);
   const entryPoint = path.join(directory, 'layer.tsx');
   await writeFile(entryPoint, 'export default function Layer() { return null; }');
@@ -148,6 +148,39 @@ test('headless synthetic smoke renders source trim, caption, overlay and audio',
     await assert.rejects(readFile(`${competed}.quality.json`), {code: 'ENOENT'});
   });
 
+test('slide transitions blend a moving edge only when motion blur is enabled',
+  {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1', timeout: 120000}, async t => {
+    const directory = await scratch(t);
+    const assets = [];
+    for (const color of ['red', 'blue']) {
+      const isImage = color === 'red';
+      const file = path.join(directory, isImage ? 'red.png' : 'blue.mp4');
+      await exec('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=${color}:s=192x96:r=10:d=1`,
+        ...(isImage ? ['-frames:v', '1'] : ['-c:v', 'libx264']), file]);
+      assets.push({id: color, path: file, type: isImage ? 'image' : 'video', duration: 1, hasAudio: false});
+    }
+    const project = await createProject(path.join(directory, 'project'), {
+      settings: {width: 192, height: 96, fps: 10}, assets,
+      clips: assets.map(asset => ({id: asset.id, assetId: asset.id, sourceStart: 0, sourceEnd: 1})),
+    });
+    const mixedPixels = [];
+    for (const motionBlur of [false, true]) {
+      const edited = prepareOperations(project, [{type: 'set_transition', clipId: 'blue',
+        transition: {type: 'slide', duration: 0.4, motionBlur}}]);
+      const outputPath = path.join(directory, `slide-${motionBlur}.png`);
+      await renderProject(edited, {kind: 'still', frame: 8, outputPath});
+      const {stdout} = await exec('ffmpeg', ['-v', 'error', '-i', outputPath, '-vf', 'format=rgb24,crop=192:1:0:48',
+        '-frames:v', '1', '-f', 'rawvideo', '-'], {encoding: 'buffer'});
+      assert.ok(stdout[0] > 180 && stdout[191 * 3 + 2] > 180, 'Both adjacent pictures must be visible');
+      let mixed = 0;
+      for (let i = 0; i < stdout.length; i += 3) {
+        if (stdout[i] > 20 && stdout[i + 2] > 20) mixed++;
+      }
+      mixedPixels.push(mixed);
+    }
+    assert.ok(mixedPixels[1] > mixedPixels[0] + 4, `Expected a visibly softer edge, got ${mixedPixels} mixed pixels`);
+  });
+
 test('fractional moving previews encode the same even dimensions recorded in the quality report',
   {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1'}, async t => {
     const directory = await scratch(t);
@@ -205,6 +238,7 @@ registerRoot(() => <Composition id="CustomMotion" component={Motion} width={160}
 test('shared-timing custom layers preserve base edits, anchored overlays, captions and the engine clock',
   {skip: process.env.AGENT_VIDEO_RENDER_SMOKE !== '1', timeout: 120000}, async (t) => {
     const directory = await scratch(t);
+    await writeFile(path.join(directory, 'package.json'), JSON.stringify({dependencies: {remotion: '4.0.534'}}));
     const source = path.join(directory, 'source.mp4');
     await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n',
       '-f', 'lavfi', '-i', 'color=red:s=160x90:r=20:d=1',

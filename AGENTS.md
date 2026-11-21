@@ -22,7 +22,7 @@ Read `README.md` for the beginner overview and `docs/technical-reference.md` for
 
 Use local installed binaries and explicit local file paths. Do not introduce automatic browser or model downloads, cloud model providers, desktop shells, editor UI packages or always-running services. Custom composition code is trusted executable code; retain exact asset registration and token-protected local media routes.
 
-Pin Remotion and its renderer together at `4.0.534` until the render bridge and real rendering checks support a coordinated update. Preserve third-party attribution. Do not replace the bridge with Studio or CLI dependencies as an incidental implementation shortcut.
+Pin Remotion and its renderer together at `4.0.545` until the render bridge and real rendering checks support a coordinated update. Preserve third-party attribution. Do not replace the bridge with Studio or CLI dependencies as an incidental implementation shortcut.
 
 ## Verification
 

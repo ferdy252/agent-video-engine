@@ -1,4 +1,6 @@
 import React, {createContext, useContext, useId} from 'react';
+import {TransitionSeries, linearTiming} from '@remotion/transitions';
+import {slide} from '@remotion/transitions/slide';
 import {colorTransform} from './color-settings.mjs';
 import {motionStyle, transitionStyle, GRAPHIC_PRESETS} from './edit-controls.mjs';
 import {volumeAt} from './audio-settings.mjs';
@@ -84,7 +86,7 @@ function Clip({clip, timeline}: {clip: any; timeline: Timeline}) {
     ...(clip.position ? {left: clip.position.x, top: clip.position.y, width: clip.position.width, height: clip.position.height, right: 'auto', bottom: 'auto'} : {}),
     ...moving, ...transition, opacity: moving.opacity * transition.opacity}}>
     <MediaColorDefinition color={color}/>
-    {asset.type === 'image' ? <Img src={asset.src} style={style}/> : <OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
+    {asset.type === 'image' ? <Img src={asset.src} crossOrigin="anonymous" style={style}/> : <OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
       playbackRate={clip.playbackRate ?? 1} muted style={style}/>}
   </div>;
 }
@@ -153,13 +155,40 @@ function CaptionPages({timeline}: {timeline: Timeline}) {
   return null;
 }
 
+const slideFromRight = slide({direction: 'from-right'});
+
+function ClipPictures({timeline}: {timeline: Timeline}) {
+  // Only neighboring clips joined by slides need a shared TransitionSeries.
+  // Retain the compiled absolute start and the local source clock for every run.
+  const runs: Timeline['clips'][] = [];
+  for (const clip of timeline.clips) {
+    if (clip.type === 'gap') continue;
+    if (clip.transition?.type === 'slide') runs[runs.length - 1].push(clip);
+    else runs.push([clip]);
+  }
+  return runs.map(run => {
+    const first = run[0], last = run[run.length - 1];
+    const end = last.from + last.durationInFrames;
+    return <Sequence key={first.id} from={first.from} durationInFrames={end - first.from}>
+      {run.length === 1 ? <Clip clip={first} timeline={timeline}/> :
+        <TransitionSeries>{run.flatMap((clip, i) => {
+          const picture = <TransitionSeries.Sequence key={`clip-${clip.id}`} durationInFrames={clip.durationInFrames}>
+            <Clip clip={clip} timeline={timeline}/>
+          </TransitionSeries.Sequence>;
+          if (!i) return [picture];
+          return [<TransitionSeries.Transition key={`slide-${clip.id}`} presentation={slideFromRight}
+            timing={linearTiming({durationInFrames: clip.transitionFrames})}
+            motionBlur={clip.transition.motionBlur ? {} : undefined}/>, picture];
+        })}</TransitionSeries>}
+    </Sequence>;
+  });
+}
+
 export function TimelineComposition({timeline, customLayerProps}: EngineProps) {
   const CustomLayer = useContext(CustomLayerContext);
   return <AbsoluteFill style={{backgroundColor: timeline.settings?.background ?? '#000000'}}>
     <AbsoluteFill style={{zIndex: 0, isolation: 'isolate'}}>
-      {timeline.clips.filter(clip => clip.type !== 'gap').map((clip) => <Sequence key={clip.id} from={clip.from} durationInFrames={clip.durationInFrames}>
-        <Clip clip={clip} timeline={timeline}/>
-      </Sequence>)}
+      <ClipPictures timeline={timeline}/>
       {timeline.clips.filter(clip => clip.type !== 'gap' && clip.audioDurationInFrames > 0).map(clip => <Sequence key={`audio-${clip.id}`}
         from={clip.audioFrom} durationInFrames={clip.audioDurationInFrames} layout="none">
         <ClipSound clip={clip} timeline={timeline}/>

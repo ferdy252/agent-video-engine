@@ -56,6 +56,8 @@ test('transitions overlap real source ranges and reject triple overlaps, gaps an
     [{type: 'set_transition', clipId: 'c0', transition: {type: 'dip', duration: .5}}],
     [{type: 'set_transition', clipId: 'c2', transition: {type: 'dip', duration: 3.8}}],
     [{type: 'set_transition', clipId: 'c1', transition: {type: 'dip', duration: .01}}],
+    [{type: 'set_transition', clipId: 'c1', transition: {type: 'dip', duration: .5, motionBlur: true}}],
+    [{type: 'set_transition', clipId: 'c1', transition: {type: 'slide', duration: .5, motionBlur: 1}}],
     [{type: 'insert_gap', index: 1, duration: .5}],
   ]) assert.throws(() => prepareOperations(edited, operations), {code: 'VALIDATION_ERROR'});
 });

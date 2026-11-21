@@ -7,7 +7,8 @@ import {VERSION} from 'remotion';
 
 const require = createRequire(import.meta.url);
 const engineRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const supportedVersion = '4.0.534';
+const supportedVersion = '4.0.545';
+const compatibleProjectVersions = new Set([supportedVersion, '4.0.534']);
 
 export async function checkProjectVersion(entryPoint) {
   let directory = dirname(resolve(entryPoint));
@@ -15,7 +16,7 @@ export async function checkProjectVersion(entryPoint) {
     try {
       const metadata = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
       const declared = metadata.dependencies?.remotion || metadata.devDependencies?.remotion;
-      if (declared && declared !== supportedVersion) {
+      if (declared && !compatibleProjectVersions.has(declared)) {
         throw new Error(`Composition project declares Remotion ${declared}; this engine uses ${supportedVersion}. Migrate explicitly before rendering.`);
       }
       if (declared) return;
@@ -37,7 +38,6 @@ export async function bundle({entryPoint, outDir, onProgress, staticBase, static
   onProgress?.(0);
   const aliases = Object.fromEntries(['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client']
     .map((name) => [name, require.resolve(name)]));
-  for (const name of ['remotion', 'remotion/no-react', 'remotion/version']) aliases[name] = fileURLToPath(import.meta.resolve(name));
   const contents = customLayer ? `import * as React from 'react';
 import {Internals, registerRoot} from 'remotion';
 import * as LayerModule from ${JSON.stringify(customLayer.entryPoint)};
@@ -57,6 +57,12 @@ registerRoot(createEngineRoot(CustomLayer));`
       resolveDir: engineRoot, sourcefile: 'agent-video-entry.ts', loader: 'ts'},
     outfile: join(outDir, 'bundle.js'), bundle: true, platform: 'browser', format: 'iife',
     target: 'chrome120', jsx: 'automatic', minify: true, sourcemap: 'linked', metafile: true,
+    plugins: [{name: 'engine-remotion-runtime', setup(build) {
+      // Saved compositions can have their own node_modules. Resolve shared browser
+      // packages and their exported subpaths from this verified engine installation.
+      build.onResolve({filter: /^(?:remotion|@remotion\/(?:media|captions|fonts|transitions|motion-blur))(?:\/|$)/},
+        ({path}) => ({path: fileURLToPath(import.meta.resolve(path))}));
+    }}],
     alias: aliases, nodePaths: [join(engineRoot, 'node_modules')],
     define: {'process.env.NODE_ENV': '"production"'}, logLevel: 'silent',
     loader: {'.png': 'file', '.jpg': 'file', '.jpeg': 'file', '.webp': 'file', '.gif': 'file',
@@ -72,7 +78,7 @@ registerRoot(createEngineRoot(CustomLayer));`
 <link rel="icon" href="data:,">${hasCss ? '<link rel="stylesheet" href="bundle.css">' : ''}</head><body>
 <script>
 window.process={env:{...JSON.parse(window.remotion_envVariables||'{}'),NODE_ENV:'production'}};
-window.siteVersion='11';window.remotion_version='${supportedVersion}';
+window.siteVersion='12';window.remotion_version='${supportedVersion}';
 window.remotion_staticBase=${staticBase ? safeJson(staticBase) : "new URL('./public',location.href).pathname"};window.remotion_staticFiles=${safeJson(staticFiles)};
 window.remotion_publicPath='./';window.remotion_outputsBase=null;window.remotion_publicFolderExists=null;
 window.remotion_numberOfAudioTags=0;window.remotion_audioLatencyHint='playback';

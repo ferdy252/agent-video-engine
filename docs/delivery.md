@@ -74,7 +74,7 @@ The sidecar carries text and timing. The rendered MP4 carries the caption design
 
 Call `export_timeline` to write a native OpenTimelineIO timeline. It contains editable media clips, source in-points, gaps, video and audio tracks, and local URLs for the referenced originals. The output clock preserves sequence timing, including overlap handles, playback rates and independent audio placement for J/L cuts. Bring the original media or relink it in the receiving editor.
 
-Crossfades use the standard OTIO dissolve. Dip and wipe retain their original type and timing as custom transitions. Receiving editors vary in how they interpret transitions, playback rates, stills, media timecode and linked audio.
+Crossfades use the standard OTIO dissolve. Dip, wipe and slide retain their original type and timing as custom transitions. Receiving editors vary in how they interpret transitions, playback rates, stills, media timecode and linked audio.
 
 Legacy videos with unknown audio metadata keep a separate audio track, matching the engine renderer. Receiving editors may leave that track empty for picture-only files.
 

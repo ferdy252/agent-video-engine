@@ -18,15 +18,16 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@remotion/captions": "4.0.534",
-    "@remotion/fonts": "4.0.534",
-    "@remotion/media": "4.0.534",
-    "@remotion/renderer": "4.0.534",
+    "@remotion/captions": "4.0.545",
+    "@remotion/fonts": "4.0.545",
+    "@remotion/media": "4.0.545",
+    "@remotion/renderer": "4.0.545",
+    "@remotion/transitions": "4.0.545",
     "esbuild": "0.28.1",
     "gsap": "3.14.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "remotion": "4.0.534",
+    "remotion": "4.0.545",
     "zod": "3.25.76"
   }
 }

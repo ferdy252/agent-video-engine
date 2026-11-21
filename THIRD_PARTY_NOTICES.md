@@ -6,17 +6,17 @@ The original MIT copyright and permission notice is retained in [notices/legacy-
 
 ## Rendering runtime
 
-The render-only bridge in `src/render-bridge.tsx` is adapted from Remotion 4.0.534, copyright 2026 Remotion. It retains composition evaluation and rendering behavior. The editor interface, Studio loader and player controls are excluded.
+The render-only bridge in `src/render-bridge.tsx` is adapted from Remotion 4.0.545, copyright 2026 Remotion. It retains composition evaluation and rendering behavior. The editor interface, Studio loader and player controls are excluded.
 
-Upstream source: https://github.com/remotion-dev/remotion/blob/v4.0.534/packages/studio/src/renderEntry.tsx
+Upstream source: https://github.com/remotion-dev/remotion/blob/v4.0.545/packages/studio/src/renderEntry.tsx
 
-Pinned upstream license: https://github.com/remotion-dev/remotion/blob/v4.0.534/LICENSE.md
+Pinned upstream license: https://github.com/remotion-dev/remotion/blob/v4.0.545/LICENSE.md
 
 The upstream Remotion license is retained verbatim below. The Remotion runtime dependencies retain their own upstream terms and notices. This repository does not relicense Remotion or grant rights to sell, sublicense or relicense a Remotion derivative. Any separate license for original engine code does not override the upstream terms for Remotion-derived code or dependencies.
 
 Public source visibility does not make the Remotion components OSI-licensed open source. Remotion describes its licensing at https://www.remotion.dev/docs/license/faq. Users of this engine must satisfy the license applicable to their own use of Remotion.
 
-The bridge and renderer are pinned together to 4.0.534. Upgrading Remotion requires verifying the compatibility layer and reviewing the license shipped with the new version.
+The bridge and renderer are pinned together to 4.0.545. Upgrading Remotion requires verifying the compatibility layer and reviewing the license shipped with the new version.
 
 ## Retained upstream license
 
@@ -64,8 +64,8 @@ Support is provided on a best-we-can-do basis via GitHub Issues and Discord.
 
 You are required to obtain a Company License to use Remotion if you are not within the group of entities eligible for a Free License. This license will enable you to use Remotion for the allowed use cases specified in the Free License, and give you access to prioritized support (read the [Support Policy](https://www.remotion.dev/docs/support)).
 
-Visit [remotion.pro](https://www.remotion.pro/license) for pricing and to buy a license.
+Visit [remotion.dev](https://www.remotion.dev/docs/license/pricing) for pricing and to buy a license.
 
 ### FAQs
 
-Are you not sure whether you need a Company License because of an edge case? Here are some [frequently asked questions](https://www.remotion.pro/faq).
+Are you not sure whether you need a Company License because of an edge case? Here are some [frequently asked questions](https://www.remotion.dev/docs/license/faq).

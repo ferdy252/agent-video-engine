@@ -186,7 +186,7 @@ function transition(left, right, fps) {
   const after = overlap - before;
   const type = right.transition?.type ?? 'crossfade';
   return {before, after, cut: right.from + before, node: {
-    OTIO_SCHEMA: 'Transition.1', metadata: metadata({type, fromFrame: right.from, durationInFrames: overlap}),
+    OTIO_SCHEMA: 'Transition.1', metadata: metadata({type, ...(right.transition?.motionBlur === undefined ? {} : {motionBlur: right.transition.motionBlur}), fromFrame: right.from, durationInFrames: overlap}),
     name: type, in_offset: time(before, fps), out_offset: time(after, fps),
     transition_type: type === 'crossfade' ? 'SMPTE_Dissolve' : 'Custom_Transition',
   }};
@@ -286,7 +286,7 @@ export async function exportTimeline(project, {outputPath, format = 'otio', sign
   const limitations = [
     'This editable timeline references original files by local URL. Keep them available or relink the media in the receiving editor.',
     'Receiving editors differ in their handling of retimes, crossfades, custom transitions, still images and media timecode.',
-    'Dip and wipe transfer their timing and type as custom transitions. Receiving editors may substitute a cut.',
+    'Dip, wipe and slide transfer their timing and type as custom transitions. Receiving editors may substitute a cut.',
     'Engine layout, color, keyframes, caption styling, text graphics, audio fades/finishing and custom motion are not rendered into this interchange. Use subtitle sidecars and the MP4 for those results.',
     'Separate audio tracks carry source audio and J/L timing. Legacy videos with unknown audio metadata retain an audio track, matching the engine renderer. Importers may leave that track empty for picture-only files.',
     'Importers vary in how they restore linked clip selections and engine mix settings.',

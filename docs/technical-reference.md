@@ -359,7 +359,7 @@ This request deletes a source interval and attaches a styled callout to a retain
 
 ## Transitions and split audio cuts
 
-Put an incoming transition on the second clip with `set_transition`. Its type is `crossfade`, `dip` or `wipe`. Duration is in output seconds, with at least two frames and at most 30 seconds. The transition uses the retained end of the first clip and the retained start of the second. The clips overlap, which shortens their combined time by the overlap duration. The overlaps at both ends of a clip must fit inside its duration. Use a gap to insert time on the output clock.
+Put an incoming transition on the second clip with `set_transition`. Its type is `crossfade`, `dip`, `wipe` or `slide`. A slide pushes the previous picture to the left as the next picture enters from the right. Use `{"type":"slide","duration":0.4,"motionBlur":true}` for Remotion’s sampled transition blur. A slide has sharp edges by default. Duration is in output seconds, with at least two frames and at most 30 seconds. The transition uses the retained end of the first clip and the retained start of the second. The clips overlap, which shortens their combined time by the overlap duration. The overlaps at both ends of a clip must fit inside its duration. Use a gap to insert time on the output clock.
 
 Use `set_clip_audio` to start audio ahead of picture or carry it past a cut. `sourceStart` and `sourceEnd` select the audio range in source seconds. Supply both together. `assetId` optionally selects a separate registered sound source. `offset` moves the sound relative to the picture start in output seconds. A negative value starts it earlier, and time before frame zero is trimmed. The clip's playback rate also applies to its sound. Late audio can extend the output duration.
 
@@ -491,7 +491,7 @@ Standalone compositions receive `{...custom.props, timeline}`. The timeline cont
 
 `custom.publicDir` is optional and must identify an absolute local directory. `staticFile()` and `getStaticFiles()` use token-protected loopback routes for inventoried files, including symlinked files and directories, without copying those media files. Unregistered local paths are not served. Custom composition code is trusted executable project code.
 
-The render-only bridge pins Remotion and `@remotion/renderer` to **4.0.534**. It uses esbuild and a compatibility layer adapted from upstream render internals, without Studio, the Remotion CLI, Webpack or Rspack. A mismatched runtime or composition dependency declaration fails explicitly. Upgrade Remotion packages together and verify the bridge before adopting another version. Consult the repository's third-party notices for attribution and dependency licensing.
+The render-only bridge pins Remotion and `@remotion/renderer` to **4.0.545**. It uses esbuild and a compatibility layer adapted from upstream render internals, without Studio, the Remotion CLI, Webpack or Rspack. Custom projects pinned to the previous engine version (4.0.534) also render with the current engine packages. Other version declarations require explicit migration. Upgrade Remotion packages together and verify the bridge before adopting another version. Consult the repository's third-party notices for attribution and dependency licensing.
 
 ## Development checks
 

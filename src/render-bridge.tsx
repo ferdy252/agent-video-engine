@@ -1,7 +1,7 @@
-// Headless bridge for Remotion 4.0.534, adapted from the upstream Studio
+// Headless bridge for Remotion 4.0.545, adapted from the upstream Studio
 // renderEntry runtime. It contains no editor, player controls or Studio loader.
 // See THIRD_PARTY_NOTICES.md for origin and retained license terms.
-import React, {useContext, useEffect, useRef, useState} from 'react';
+import React, {useContext, useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {continueRender, delayRender, getInputProps, Internals, useDelayRender} from 'remotion';
 import {NoReactInternals} from 'remotion/no-react';
@@ -15,8 +15,17 @@ function Canvas({mode}: {mode: any}) {
   const {setCanvasContent} = useContext(Internals.CompositionSetters);
   const container = useRef<HTMLDivElement>(null);
   const {delayRender: delay, continueRender: resume} = useDelayRender();
-  const [handle] = useState(() => delay(`Waiting for composition ${mode.compositionName}`));
-  useEffect(() => () => resume(handle), [handle, resume]);
+  const handle = useRef<number | null>(null);
+  const ready = useRef(false);
+  useLayoutEffect(() => {
+    if (ready.current) return;
+    const pending = delay(`Waiting for composition ${mode.compositionName}`);
+    handle.current = pending;
+    return () => {
+      if (handle.current === pending) resume(pending);
+      handle.current = null;
+    };
+  }, [delay, resume, mode.compositionName]);
   useEffect(() => {
     if (!compositions.length) return;
     if (!compositions.some((composition) => composition.id === mode.compositionName)) {
@@ -29,17 +38,43 @@ function Canvas({mode}: {mode: any}) {
     const element = container.current;
     const portal = Internals.portalNode();
     element.appendChild(portal);
-    resume(handle);
+    ready.current = true;
+    if (handle.current !== null) {
+      resume(handle.current);
+      handle.current = null;
+    }
     return () => {if (portal.parentNode === element) element.removeChild(portal);};
-  }, [canvasContent, handle, resume]);
+  }, [canvasContent, resume]);
   if (!currentCompositionMetadata) return null;
   return <div id="remotion-canvas" ref={container} style={{display: 'flex', backgroundColor: 'transparent',
     width: currentCompositionMetadata.width, height: currentCompositionMetadata.height}}/>;
 }
 
+function RenderContexts({children}: React.PropsWithChildren) {
+  const [media, setMedia] = useState(() => ({
+    videoEnabled: browser.remotion_videoEnabled, audioEnabled: browser.remotion_audioEnabled,
+  }));
+  useLayoutEffect(() => {
+    browser.remotion_setMediaEnabled = (videoEnabled: boolean, audioEnabled: boolean) => {
+      if (browser.remotion_videoEnabled === videoEnabled && browser.remotion_audioEnabled === audioEnabled) return;
+      browser.remotion_videoEnabled = videoEnabled;
+      browser.remotion_audioEnabled = audioEnabled;
+      const pending = delayRender('Updating render media flags');
+      setMedia({videoEnabled, audioEnabled});
+      requestAnimationFrame(() => continueRender(pending));
+    };
+    return () => {delete browser.remotion_setMediaEnabled;};
+  }, []);
+  return <Internals.RemotionRootContexts frameState={null} audioEnabled={media.audioEnabled}
+      videoEnabled={media.videoEnabled} logLevel={browser.remotion_logLevel ?? 'error'}
+      numberOfAudioTags={0} audioLatencyHint={browser.remotion_audioLatencyHint ?? 'playback'}
+      previewSampleRate={browser.remotion_sampleRate ?? 48000} _experimentalKeepAudioContextAlive={false}>{children}</Internals.RemotionRootContexts>;
+}
+
 function mount(Root: React.ComponentType, mode: any) {
   if (!['evaluation', 'composition'].includes(mode.type)) throw new Error('This bundle supports headless rendering only');
   const rendering = mode.type === 'composition';
+  if (!rendering) getInputProps();
   const metadata = rendering ? {
     props: NoReactInternals.deserializeJSONWithSpecialTypes(mode.serializedResolvedPropsWithSchema),
     durationInFrames: mode.compositionDurationInFrames, fps: mode.compositionFps,
@@ -52,14 +87,11 @@ function mount(Root: React.ComponentType, mode: any) {
   root.render(<Internals.CompositionManagerProvider initialCanvasContent={null}
     onlyRenderComposition={rendering ? mode.compositionName : null} currentCompositionMetadata={metadata}
     initialCompositions={[]}>
-    <Internals.RemotionRootContexts frameState={null} audioEnabled={browser.remotion_audioEnabled}
-      videoEnabled={browser.remotion_videoEnabled} logLevel={browser.remotion_logLevel ?? 'error'}
-      numberOfAudioTags={0} audioLatencyHint={browser.remotion_audioLatencyHint ?? 'playback'}
-      previewSampleRate={browser.remotion_sampleRate ?? 48000} _experimentalKeepAudioContextAlive={false}>
+    <RenderContexts>
       <Internals.RenderAssetManagerProvider collectAssets={null}>
         <Root/>{rendering ? <Canvas mode={mode}/> : null}
       </Internals.RenderAssetManagerProvider>
-    </Internals.RemotionRootContexts>
+    </RenderContexts>
   </Internals.CompositionManagerProvider>);
 }
 
@@ -78,7 +110,7 @@ async function calculate(id: string) {
       calculateMetadata: composition.calculateMetadata,
       compositionDurationInFrames: composition.durationInFrames ?? null,
       compositionFps: composition.fps ?? null, compositionWidth: composition.width ?? null,
-      compositionHeight: composition.height ?? null, compositionId: composition.id,
+      compositionHeight: composition.height ?? null, compositionId: composition.id, schema: composition.schema ?? null,
       inputProps: {...composition.defaultProps ?? {}, ...getInputProps() ?? {}},
       defaultProps: composition.defaultProps ?? {}, signal: new AbortController().signal,
     });
