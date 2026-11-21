@@ -54,3 +54,38 @@ test('two real exports isolate unexpected picture and sound outside per-track ti
   const differentSize = await create('square', {size:'120x120'});
   assert.equal((await compareExports({baselinePath,candidatePath:differentSize})).status, 'incompatible');
 });
+
+test('MP4 tail rounding compares every decoded audio sample and keeps larger shortfalls invalid', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'compare-audio-tail-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const picture = join(dir, 'picture.mp4');
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=black:s=64x64:r=10:d=0.5',
+    '-c:v', 'libx264', picture]);
+  async function exportWithTail(name, frequency, extraSamples) {
+    const audio = join(dir, name + '.aac'), file = join(dir, name + '.mp4');
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=sample_rate=48000:frequency=' + frequency,
+      '-frames:a', '6', '-c:a', 'aac', '-f', 'adts', audio]);
+    const packets = await run('ffprobe', ['-v', 'error', '-count_packets', '-select_streams', 'a:0',
+      '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', audio]);
+    const count = Number(packets.stdout.trim());
+    // MP4 can assign a longer presentation duration to the final AAC packet
+    // while its decoded sample count stays fixed.
+    const muxed = join(dir, name + '-original.mp4');
+    await run('ffmpeg', ['-v', 'error', '-i', picture, '-i', audio, '-map', '0:v', '-map', '1:a',
+      '-c', 'copy', '-movie_timescale', '48000', muxed]);
+    await run('ffmpeg', ['-v', 'error', '-i', muxed, '-c', 'copy', '-bsf:a', `setts=duration=if(eq(N\\,${count - 1})\\,DURATION+${extraSamples}\\,DURATION)`,
+      '-movie_timescale', '48000', file]);
+    return {file, samples: count * 1024};
+  }
+  const {file: baselinePath, samples} = await exportWithTail('baseline', 440, 16);
+  const same = await compareExports({baselinePath, candidatePath: baselinePath});
+  assert.equal(same.status, 'no_unexpected_changes');
+  assert.equal(same.audio.comparedUnits, samples);
+  assert.equal(same.audio.containerTailRoundingSamples, 16);
+  const {file: candidatePath} = await exportWithTail('different-sound', 880, 16);
+  const changed = await compareExports({baselinePath, candidatePath});
+  assert.equal(changed.status, 'needs_review');
+  assert.ok(changed.audio.totalRanges > 0);
+  const {file: short} = await exportWithTail('incomplete', 440, 2048);
+  await assert.rejects(compareExports({baselinePath: short, candidatePath: short}), /Incomplete audio comparison/);
+});

@@ -112,6 +112,22 @@ function changedSound(a, b, start, end, channels) {
   return false;
 }
 
+// MP4 can round the presentation duration of its last packet beyond the
+// samples it actually contains. Only accept a short tail explained by that
+// frame on each file, after both decoders completed and their lengths matched.
+async function confirmsRoundedTail(path, audio, decodedSamples, declaredSamples, signal) {
+  const seek = Math.max(0, audio.start + audio.duration - 1);
+  const {stdout} = await run('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-read_intervals', `${seek}%`,
+    '-show_frames', '-show_entries', 'frame=pts_time,duration_time,pkt_duration_time,nb_samples',
+    '-of', 'compact=p=0:nk=0', path], {signal, maxOutput: 4096});
+  const line = stdout.trim().split('\n').findLast(row => row.startsWith('pts_time='));
+  if (!line) return false;
+  const frame = Object.fromEntries(line.split('|').map(field => field.split('=')));
+  const start = Math.round((Number(frame.pts_time) - audio.start) * audio.rate);
+  const duration = Math.round(Number(frame.duration_time ?? frame.pkt_duration_time) * audio.rate);
+  return start + Number(frame.nb_samples) === decodedSamples && start + duration === declaredSamples;
+}
+
 async function compareAudio(a, b, audio, changes, videoStart, signal) {
   const offset = audio.start - videoStart;
   const allowed = allowedIntervals(changes.map(c => ({...c, startSeconds: c.startSeconds - offset, endSeconds: c.endSeconds - offset})), 'audio', audio.rate);
@@ -129,7 +145,13 @@ async function compareAudio(a, b, audio, changes, videoStart, signal) {
       pos = next;
     }
   }
-  if (pos !== samples) throw new Error('Incomplete audio comparison.');
+  if (pos !== samples) {
+    const missing = samples - pos;
+    if (!pos || missing >= audio.rate / 1000) throw new Error('Incomplete audio comparison.');
+    const tails = await Promise.all([a, b].map(path => confirmsRoundedTail(path, audio, pos, samples, signal)));
+    if (!tails.every(Boolean)) throw new Error('Incomplete audio comparison.');
+    finding.result.containerTailRoundingSamples = missing;
+  }
   for (const r of finding.result.ranges) {r.startSeconds += offset; r.endSeconds += offset;}
   return finding.result;
 }
