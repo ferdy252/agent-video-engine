@@ -51,27 +51,67 @@ export async function fileFingerprint(path) {
   return `sha256:${hash.digest('hex')}`;
 }
 
-export function videoGeometry(video) {
-  const rotation = Number(video?.side_data_list?.find(entry => entry.rotation !== undefined)?.rotation ?? video?.tags?.rotate ?? 0);
+// JPEG EXIF orientation may be attached to the decoded frame rather than its stream.
+const imageFrameMetadata = ['-read_intervals', '%+#1', '-show_entries', 'frame=media_type:frame_side_data=rotation'];
+
+export function videoGeometry(video, frame) {
+  const rotation = Number(frame?.side_data_list?.find(entry => entry.rotation !== undefined)?.rotation ??
+    video?.side_data_list?.find(entry => entry.rotation !== undefined)?.rotation ?? video?.tags?.rotate ?? 0);
   const [sarWidth, sarHeight] = String(video?.sample_aspect_ratio ?? '1:1').split(':').map(Number);
   return {width: video.width, height: video.height, rotation: Number.isFinite(rotation) ? rotation : 0,
     sampleAspectRatio: sarWidth > 0 && sarHeight > 0 ? sarWidth / sarHeight : 1};
 }
 
+export async function readVideoGeometry(path, signal, {image = false} = {}) {
+  const {stdout} = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_streams',
+    ...(image ? imageFrameMetadata : []), '-of', 'json', path], {signal});
+  const {streams, frames} = JSON.parse(stdout);
+  return streams?.[0] ? videoGeometry(streams[0], frames?.[0]) : null;
+}
+
+// Geometry in square display pixels. A quarter-turn transposes the raster
+// after its encoded horizontal sample aspect ratio has been applied.
+export function displayGeometry({width, height, sampleAspectRatio, rotation = 0}) {
+  const displayWidth = width * (Number.isFinite(sampleAspectRatio) && sampleAspectRatio > 0 ? sampleAspectRatio : 1);
+  return Math.abs(rotation) % 180 === 90 ? {width: height, height: displayWidth} : {width: displayWidth, height};
+}
+
+export async function assetDisplayGeometry(asset, signal) {
+  if (asset.type === 'audio') return null;
+  const stored = asset.width > 0 && asset.height > 0 ? displayGeometry(asset) : null;
+  if (asset.type === 'video' && stored && Number.isFinite(asset.rotation) &&
+      Number.isFinite(asset.sampleAspectRatio) && asset.sampleAspectRatio > 0) return stored;
+  try {
+    const geometry = await readVideoGeometry(asset.path, signal, {image: asset.type === 'image'});
+    if (geometry?.width > 0 && geometry.height > 0) return displayGeometry(geometry);
+  } catch (error) {
+    if (asset.type !== 'image' || error.code !== 'PROCESS_FAILED') throw error;
+  }
+  // A registered browser image, e.g. SVG, can have a known size even when FFprobe cannot report its raster.
+  return stored;
+}
+
+export async function sourcePreviewDimensions(asset, signal) {
+  const {width, height} = await assetDisplayGeometry(asset, signal) ?? {width: 640, height: 360};
+  const scale = Math.min(1, 16384 / Math.max(width, height));
+  return {width: Math.max(2, Math.round(width * scale)), height: Math.max(2, Math.round(height * scale))};
+}
+
 export async function probeAsset(path, id = randomUUID()) {
   const absolute = await realpath(resolve(path));
-  const {stdout} = await run('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', absolute]);
+  const image = /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)$/i.test(absolute);
+  const {stdout} = await run('ffprobe', ['-v', 'error', '-show_format', '-show_streams',
+    ...(image ? imageFrameMetadata : []), '-of', 'json', absolute]);
   const data = JSON.parse(stdout);
   const video = data.streams?.find(stream => stream.codec_type === 'video');
   const audio = data.streams?.find(stream => stream.codec_type === 'audio');
   if (!video && !audio) throw new Error('The file contains no supported image, video or audio stream');
   const duration = Number(data.format?.duration ?? video?.duration ?? audio?.duration ?? 0);
-  const image = /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)$/i.test(absolute);
   const fraction = String(video?.avg_frame_rate || video?.r_frame_rate || '0/1').split('/').map(Number);
   const fps = fraction[1] ? fraction[0] / fraction[1] : fraction[0];
   return {id, path: absolute, type: image ? 'image' : video ? 'video' : 'audio',
     duration: Number.isFinite(duration) ? duration : 0,
-    ...(video ? {...videoGeometry(video), fps: Number.isFinite(fps) && fps > 0 ? fps : 30} : {}),
+    ...(video ? {...videoGeometry(video, data.frames?.[0]), fps: Number.isFinite(fps) && fps > 0 ? fps : 30} : {}),
     hasAudio: Boolean(audio), fingerprint: await fileFingerprint(absolute)};
 }
 

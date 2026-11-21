@@ -15,6 +15,7 @@ import {normalizeTranscript, transcribeAsset} from '../src/transcribe.mjs';
 import {getJob, jobDir, saveJob} from '../src/jobs.mjs';
 import {bundle} from '../src/bundle.mjs';
 import {callTool} from '../src/api.mjs';
+import {createProject} from '../src/project.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(import.meta.dirname, '..');
@@ -118,6 +119,60 @@ test('durable job reads preserve completed results and detect a stopped worker',
     await saveJob(dir, {id, status: 'running', createdAt: new Date().toISOString()});
     assert.equal((await getJob(project, id)).status, 'interrupted');
   } finally { await rm(project, {recursive: true, force: true}); }
+});
+
+test('source stills and moving previews honor display rotation, pixel shape and photo orientation', {
+  skip: process.env.AGENT_VIDEO_INTEGRATION !== '1', timeout: 90000,
+}, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'engine-portrait-preview-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const env = {...toolEnv, VIDEO_ENGINE_RUNTIME: join(dir, 'runtime')};
+  for (const [name, kind, sar] of [['phone', 'still', 1], ['anamorphic', 'preview', 2], ['photo', 'still', 1]]) {
+    const photo = name === 'photo';
+    const projectDir = join(dir, name), base = join(dir, name + '.mp4'), source = join(dir, name + (photo ? '.jpg' : '.mov'));
+    await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=160x90:r=10:d=0.5',
+      '-vf', `drawbox=x=0:y=0:w=iw/2:h=ih:color=blue:t=fill,setsar=${sar}`,
+      ...(photo ? ['-frames:v', '1', source] : ['-c:v', 'libx264', base])]);
+    if (photo) {
+      const jpeg = await readFile(source);
+      // APP1 Exif with one TIFF orientation tag (6 = rotate clockwise).
+      const orientation = Buffer.from('ffe100224578696600004d4d002a00000008000101120003000000010006000000000000', 'hex');
+      await writeFile(source, Buffer.concat([jpeg.subarray(0, 2), orientation, jpeg.subarray(2)]));
+    } else await run('ffmpeg', ['-v', 'error', '-display_rotation', '90', '-i', base, '-c', 'copy', source]);
+    const imported = await callTool('project_create', {projectDir, name, width: 160, height: 90, fps: 10});
+    const {asset, revision} = await callTool('media_add', {projectDir, expectedRevision: imported.revision, path: source});
+    let request = {projectDir, expectedRevision: revision, assetId: asset.id, scale: 1, kind};
+    if (sar === 2 || photo) {
+      // Old video imports lack display metadata; old photo imports can incorrectly report zero rotation.
+      const {rotation, sampleAspectRatio, ...legacyAsset} = asset;
+      if (photo) {
+        assert.equal(rotation, -90);
+        Object.assign(legacyAsset, {rotation: 0, sampleAspectRatio});
+      }
+      const legacyDir = join(dir, name + '-legacy');
+      await createProject(legacyDir, {name: 'Older source', settings: {width: 160, height: 90, fps: 10}, assets: [legacyAsset]});
+      request = {...request, projectDir: legacyDir, expectedRevision: 0};
+    }
+    const requestPath = join(dir, kind + '.json');
+    await writeFile(requestPath, JSON.stringify(request));
+    const queued = await exec(process.execPath, [join(root, 'src/cli.mjs'), 'source_preview', requestPath], {env});
+    const {id} = JSON.parse(queued.stdout);
+    let job;
+    const deadline = Date.now() + 40000;
+    do {
+      await delay(100);
+      job = await getJob(request.projectDir, id);
+    } while (['queued', 'running'].includes(job.status) && Date.now() < deadline);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.deepEqual([job.result.width, job.result.height], [90, 160 * sar]);
+    const {stdout} = await exec('ffmpeg', ['-v', 'error', '-i', job.result.outputPath, '-vf', 'scale=8:8:flags=neighbor',
+      '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], {env, encoding: 'buffer'});
+    // The MOV turns counterclockwise and the JPEG clockwise. Letterboxing or double rotation changes these samples.
+    for (const x of [0, 7]) {
+      assert.ok(stdout[x * 3 + (photo ? 2 : 0)] > 200);
+      assert.ok(stdout[(7 * 8 + x) * 3 + (photo ? 0 : 2)] > 200);
+    }
+  }
 });
 
 test('real MCP: import, source preview, edit, caption, export, undo and queue cancellation', {

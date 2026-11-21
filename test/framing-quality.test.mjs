@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {analyzeFraming} from '../src/framing-quality.mjs';
 import {callTool} from '../src/api.mjs';
-import {run} from '../src/media.mjs';
+import {run, sourcePreviewDimensions} from '../src/media.mjs';
 
 const project = (clip = {}, extra = {}) => ({revision: 0, settings: {width: 1080, height: 1920, fps: 30},
   assets: [{id: 'camera', type: 'video', width: 1280, height: 720, duration: 10, hasAudio: true}],
@@ -84,4 +84,13 @@ test('MCP preflight inspects a draft and preset without saving or touching origi
   assert.deepEqual(await callTool('project_inspect', {projectDir}), saved);
   assert.deepEqual(await readFile(source), sourceBytes);
   await assert.rejects(callTool('quality_preflight', {projectDir, expectedRevision: 0}), {code: 'STALE_REVISION'});
+});
+
+test('source preview canvases honor inverted rotation and stay within the supported dimension limits', async () => {
+  const video = {type: 'video', width: 160, height: 90, sampleAspectRatio: 1.5};
+  assert.deepEqual(await sourcePreviewDimensions({...video, rotation: -90}), {width: 90, height: 240});
+  assert.deepEqual(await sourcePreviewDimensions({...video, rotation: 180}), {width: 240, height: 90});
+  assert.deepEqual(await sourcePreviewDimensions({...video, width: 16384, height: 8192, rotation: 90, sampleAspectRatio: 2}),
+    {width: 4096, height: 16384});
+  assert.deepEqual(await sourcePreviewDimensions({type: 'audio'}), {width: 640, height: 360});
 });

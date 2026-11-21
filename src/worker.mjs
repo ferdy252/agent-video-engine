@@ -5,7 +5,7 @@ import {createServer} from 'node:net';
 import {createHash} from 'node:crypto';
 import {applyOperations} from './project.mjs';
 import {jobDir, saveJob, runtimeDir, isCancelled} from './jobs.mjs';
-import {assertAssets} from './media.mjs';
+import {assertAssets, sourcePreviewDimensions} from './media.mjs';
 import {transcribeAsset} from './transcribe.mjs';
 
 const [projectDir, id] = process.argv.slice(2);
@@ -114,7 +114,7 @@ try {
       const end = job.request.sourceEnd ?? (asset.type === 'image' ? start + 1 : Math.min(asset.duration, start + 5));
       renderSnapshot = {...job.snapshot, audio: undefined, custom: undefined, transcripts: [], overlays: [],
         assets: job.snapshot.assets.map(({color, ...asset}) => asset),
-        settings: {...job.snapshot.settings, width: asset.width || 640, height: asset.height || 360},
+        settings: {...job.snapshot.settings, ...await sourcePreviewDimensions(asset, controller.signal)},
         captions: {...job.snapshot.captions, enabled: false, wordOverrides: []}, clips: [{id: 'source-preview', assetId: asset.id,
           sourceStart: start, sourceEnd: end, playbackRate: 1, volume: 1, fit: 'contain'}]};
     }

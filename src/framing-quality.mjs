@@ -1,6 +1,6 @@
 import {compileTimeline} from './timeline.mjs';
 import {valueAt} from './edit-controls.mjs';
-import {run, videoGeometry} from './media.mjs';
+import {displayGeometry, readVideoGeometry} from './media.mjs';
 
 /** Read actual raster geometry, including old imports that lack rotation/SAR. */
 export async function inspectFraming(project, options = {}) {
@@ -10,9 +10,8 @@ export async function inspectFraming(project, options = {}) {
   for (const asset of timeline.assets) {
     if (!used.has(asset.id) || !['video', 'image'].includes(asset.type)) {assets.push(asset); continue;}
     options.signal?.throwIfAborted();
-    const {stdout} = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_streams', '-of', 'json', asset.path], {signal: options.signal});
-    const stream = JSON.parse(stdout).streams?.[0];
-    assets.push({...asset, ...(stream ? videoGeometry(stream) : {width: null, height: null})});
+    const geometry = await readVideoGeometry(asset.path, options.signal, {image: asset.type === 'image'});
+    assets.push({...asset, ...(geometry ?? {width: null, height: null})});
   }
   return analyzeFraming(project, {...options, timeline: {...timeline, assets}});
 }
@@ -87,8 +86,7 @@ export function analyzeFraming(project, {timeline = compileTimeline(project), sc
       const sar = asset.sampleAspectRatio ?? 1;
       const nativeWidth = rotation === 90 ? asset.height : asset.width;
       const nativeHeight = rotation === 90 ? asset.width : asset.height;
-      const displayWidth = rotation === 90 ? asset.height : asset.width * sar;
-      const displayHeight = rotation === 90 ? asset.width * sar : asset.height;
+      const {width: displayWidth, height: displayHeight} = displayGeometry(asset);
       const fitScale = (fit === 'cover' ? Math.max : Math.min)(
         box.width / widthFraction / displayWidth, box.height / heightFraction / displayHeight);
       let worst = null;
