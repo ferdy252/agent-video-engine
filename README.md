@@ -7,6 +7,8 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 ## What it can do
 
 - Find possible retakes inside one recording and preview the matching source ranges.
+- Search a screen recording for visible words on macOS. See the matching pictures and source timestamps, even in silent footage.
+- Build a playable first draft from a supplied script and timed transcripts. Use several takes in one recording, several files, or both.
 - Stage a draft, preview the exact changes and apply it as a saved revision. Compare or restore earlier versions.
 - Cut by transcript words, insert pauses and blend neighboring clips. Add a slide transition with optional motion blur. Start sound before the picture changes or let it continue afterward.
 - Reframe footage, adjust its color and animate changes in position, size or opacity.
@@ -62,6 +64,10 @@ Review the preview and tell your agent what to change. Watch and listen to the f
 Keep recording the way you normally do. The agent can use the transcript to find pauses, restarts and repeated passages inside the same file. A saved map links those possible attempts to timestamps and picture previews.
 
 The agent can search a line and preview its different deliveries before choosing cuts. Repeated wording suggests places to review.
+
+With a script, ask “Build a first cut from these lines and show me the other takes of my opening.” The editor stages matches in script order and identifies lines that need review. You can ask for the second opening and play the revised draft.
+
+For a screen recording, ask “Show me where Back Tap appears on screen.” On macOS, the agent can index sampled frames with Apple Vision and return the matching timestamps and pictures. Later searches reuse the local index. Short flashes between samples can be missed.
 
 ## Adjust the sound through chat
 

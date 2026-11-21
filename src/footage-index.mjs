@@ -2,11 +2,12 @@ import {createHash, randomUUID} from 'node:crypto';
 import {access, link, lstat, mkdir, readFile, realpath, rename, rm, stat, unlink, writeFile} from 'node:fs/promises';
 import {isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {fileURLToPath} from 'node:url';
 import {fileFingerprint, run} from './media.mjs';
 import {analyzeTakes} from './take-index.mjs';
 
 const schemaVersion = 1;
-const algorithmVersion = 1;
+const versionFor = (options) => options?.screenText ? 2 : 1;
 const cellWidth = 320, imageHeight = 180, labelHeight = 24, gap = 4;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = (message, code = 'INVALID_MEDIA_INDEX') => {throw Object.assign(new Error(message), {code});};
@@ -21,10 +22,10 @@ const indexMode = (index) => index.assetType === 'video'
   ? (visualOnly(index) ? 'visual_only' : 'text_and_visual')
   : (index.transcriptStatus === 'available' ? 'text_only' : 'metadata_only');
 
-function optionsFor({intervalSeconds = 15, maxThumbnails = 120}) {
+function optionsFor({screenText = false, intervalSeconds = screenText ? 2 : 15, maxThumbnails = 120}) {
   if (!Number.isFinite(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 120) fail('intervalSeconds must be from 1 to 120.');
   if (!Number.isInteger(maxThumbnails) || maxThumbnails < 6 || maxThumbnails > 240) fail('maxThumbnails must be an integer from 6 to 240.');
-  return {intervalSeconds, maxThumbnails};
+  return {intervalSeconds, maxThumbnails, ...(screenText ? {screenText: true} : {})};
 }
 
 function indexDirectory(projectDir, indexId) {
@@ -50,7 +51,7 @@ async function assetState(project, assetId, {stale = false} = {}) {
 }
 
 function expectedId(project, assetId, sourceFingerprint, transcriptFingerprint, options) {
-  return hash({algorithmVersion, projectId: project.id, assetId, sourceFingerprint, transcriptFingerprint, options});
+  return hash({algorithmVersion: versionFor(options), projectId: project.id, assetId, sourceFingerprint, transcriptFingerprint, options});
 }
 
 async function safeDerivedPath(directory, file) {
@@ -70,12 +71,14 @@ async function safeDerivedPath(directory, file) {
 }
 
 function validateRecord(index, project, indexId) {
-  if (!index || index.schemaVersion !== schemaVersion || index.algorithmVersion !== algorithmVersion ||
+  if (!index || index.schemaVersion !== schemaVersion || index.algorithmVersion !== versionFor(index.options) ||
     index.indexId !== indexId || index.projectId !== project.id || !['video', 'audio'].includes(index.assetType) ||
     !['frames', 'contactSheets', 'attempts', 'groups', 'sourceWords'].every((field) => Array.isArray(index[field]))) {
     fail('The saved source index is incomplete or belongs to another project. Rebuild it.', 'MEDIA_INDEX_INCOMPLETE');
   }
   optionsFor(index.options ?? {});
+  if (index.options?.screenText && index.frames.some(frame => !Array.isArray(frame.screenLines) ||
+    !frame.screenLines.every(line => typeof line === 'string'))) fail('Incomplete on-screen text. Rebuild this index.', 'MEDIA_INDEX_INCOMPLETE');
   if (index.frames.length > index.options.maxThumbnails || index.frames.some((frame) =>
     !/^frame-\d{4}$/.test(frame.id) || frame.path !== `${frame.id}.jpg` || !Number.isFinite(frame.time) || frame.time < 0 || frame.time > index.duration) ||
     index.contactSheets.some((sheet, page) => sheet.page !== page || sheet.path !== `sheet-${String(page + 1).padStart(4, '0')}.jpg` ||
@@ -240,16 +243,19 @@ function makeSheet(frames, page) {
 function summary(index, directory, cached) {
   return {indexId: index.indexId, assetId: index.assetId, sourceFingerprint: index.sourceFingerprint,
     transcriptFingerprint: index.transcriptFingerprint, indexPath: join(directory, 'index.json'), cached,
-    counts: countsFor(index), transcriptStatus: index.transcriptStatus, assetType: index.assetType,
+    counts: countsFor(index), screenText: Boolean(index.options.screenText), transcriptStatus: index.transcriptStatus, assetType: index.assetType,
     visualOnly: visualOnly(index), indexMode: indexMode(index), limitations: index.limitations};
 }
 
 /** Index originals only. This never edits a manifest, chooses a take or transcribes. */
-export async function buildMediaIndex(project, {projectDir, assetId, intervalSeconds = 15, maxThumbnails = 120, signal, onProgress} = {}) {
+export async function buildMediaIndex(project, {projectDir, assetId, intervalSeconds, maxThumbnails, screenText = false, signal, onProgress} = {}) {
   checkAbort(signal);
-  const options = optionsFor({intervalSeconds, maxThumbnails});
+  const options = optionsFor({intervalSeconds, maxThumbnails, screenText});
   const state = await assetState(project, assetId);
   const {asset, fingerprint, transcript, transcriptFingerprint} = state;
+  if (screenText && (asset.type !== 'video' || process.platform !== 'darwin')) {
+    fail('On-screen text indexing requires a video recording and Apple Vision on macOS.', 'SCREEN_TEXT_UNAVAILABLE');
+  }
   checkAbort(signal);
   const indexId = expectedId(project, assetId, fingerprint, transcriptFingerprint, options);
   const directory = indexDirectory(projectDir, indexId);
@@ -273,6 +279,20 @@ export async function buildMediaIndex(project, {projectDir, assetId, intervalSec
     const visualDuration = asset.type === 'video' ? await videoDuration(asset, signal) : null;
     const samples = asset.type === 'video' ? sampleFrames(asset, takes.attempts, options, visualDuration) : [];
     const frames = [], unavailableSamples = [];
+    const pendingText = [];
+    const recognize = async () => {
+      if (!pendingText.length) return;
+      const paths = pendingText.map(frame => join(temporary, frame.id + '-ocr.jpg'));
+      const helper = fileURLToPath(new URL('./recognize-screen-text.js', import.meta.url));
+      const {stdout} = await run('/usr/bin/osascript', ['-l', 'JavaScript', helper, ...paths], {signal});
+      const rows = JSON.parse(stdout);
+      if (rows.length !== paths.length) fail('Apple Vision returned an incomplete batch.', 'SCREEN_TEXT_INCOMPLETE');
+      for (let i = 0; i < paths.length; i++) {
+        pendingText[i].screenLines = rows[i];
+        await unlink(paths[i]);
+      }
+      pendingText.length = 0;
+    };
     const labelled = samples.length ? await supportsLabels(signal) : false;
     for (let index = 0; index < samples.length; index++) {
       checkAbort(signal);
@@ -281,11 +301,16 @@ export async function buildMediaIndex(project, {projectDir, assetId, intervalSec
       const filter = `scale=${cellWidth}:${imageHeight}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${imageHeight}:(ow-iw)/2:(oh-ih)/2:black` +
         (labelled ? `,pad=${cellWidth}:${imageHeight + labelHeight}:0:${labelHeight}:black,drawtext=text='${frame.label}':fontcolor=white:fontsize=15:x=6:y=3` : '');
       await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-n', '-ss', String(frame.time), '-i', asset.path,
-        '-map', '0:v:0', '-frames:v', '1', '-vf', filter, '-q:v', '3', join(temporary, frame.path)], {signal});
-      try {await access(join(temporary, frame.path)); frames.push(frame);}
+        '-map', '0:v:0', '-frames:v', '1', '-vf', filter, '-q:v', '3', join(temporary, frame.path),
+        ...(screenText ? ['-map', '0:v:0', '-frames:v', '1', '-vf',
+          "scale=w='min(iw,2160)':h='min(ih,2160)':force_original_aspect_ratio=decrease", '-q:v', '2',
+          join(temporary, frame.id + '-ocr.jpg')] : [])], {signal});
+      try {await access(join(temporary, frame.path)); frames.push(frame); if (screenText) pendingText.push(frame);}
       catch {unavailableSamples.push(frame.time);}
+      if (pendingText.length >= 8) await recognize();
       progress(onProgress, .1 + .55 * (index + 1) / samples.length, `Sampling original frame ${index + 1}/${samples.length}`);
     }
+    await recognize();
     const contactSheets = [];
     for (let offset = 0; offset < frames.length; offset += 12) {
       checkAbort(signal);
@@ -302,6 +327,7 @@ export async function buildMediaIndex(project, {projectDir, assetId, intervalSec
     checkAbort(signal);
     if (await fileFingerprint(asset.path) !== fingerprint) fail('Source changed while indexing. Reimport it before retrying.', 'SOURCE_CHANGED');
     const limitations = [
+      ...(screenText ? ['On-screen words are read from sampled frames locally. Brief, small or blurry text may be missed.'] : []),
       'Thumbnails are regular samples and possible attempt starts, not semantic scene or action detection.',
       'Repeated passages are possible retakes, not a best-take choice. Inspect original delivery before editing.',
       ...(takes.limitations ?? []),
@@ -313,7 +339,7 @@ export async function buildMediaIndex(project, {projectDir, assetId, intervalSec
       ...(unavailableSamples.length ? [`No video frame was available at ${unavailableSamples.length} requested sample times. Those samples were omitted, not relabelled as other times.`] : []),
       ...(!labelled && frames.length ? ['Contact-sheet labels were rendered with the installed local browser because FFmpeg drawtext was unavailable.'] : []),
     ];
-    const index = {schemaVersion, algorithmVersion, indexId, projectId: project.id, assetId, assetType: asset.type, duration: asset.duration,
+    const index = {schemaVersion, algorithmVersion: versionFor(options), indexId, projectId: project.id, assetId, assetType: asset.type, duration: asset.duration,
       sourceFingerprint: fingerprint, transcriptFingerprint, options, createdAt: new Date().toISOString(),
       frames, contactSheets, visualDuration, unavailableSamples, attempts: takes.attempts, groups: takes.groups, transcriptStatus: takes.status,
       sourceWords: transcript?.words ?? [], limitations};
@@ -366,7 +392,7 @@ export async function readMediaIndex(project, {projectDir, indexId, offset = 0, 
   const contactSheet = selected ? {...selected, path: await safeDerivedPath(directory, selected.path)} : null;
   const frameIds = new Set(selected?.frameIds ?? []);
   const frames = [];
-  for (const frame of index.frames.filter((frame) => frameIds.has(frame.id))) frames.push({...frame,
+  for (const {screenLines, ...frame} of index.frames.filter((frame) => frameIds.has(frame.id))) frames.push({...frame,
     attemptIds: frame.attemptIds.slice(0, 80), attemptCount: frame.attemptIds.length,
     path: await safeDerivedPath(directory, frame.path)});
   const hasMore = offset + attempts.length < index.attempts.length;
@@ -380,12 +406,30 @@ export async function readMediaIndex(project, {projectDir, indexId, offset = 0, 
 
 const tokens = (text) => String(text).normalize('NFKC').replace(/[\u2018\u2019]/g, "'").toLocaleLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
 
-/** Lexical spoken-text search, never visual/semantic search or take ranking. */
-export async function searchMediaIndex(project, {projectDir, indexId, query, offset = 0, limit = 20} = {}) {
+/** Lexical search of source speech or separately indexed on-screen text. */
+export async function searchMediaIndex(project, {projectDir, indexId, query, mode = 'spoken', offset = 0, limit = 20} = {}) {
   pagination(offset, limit);
   const queryTokens = tokens(query);
-  if (!queryTokens.length || queryTokens.length > 40) fail('Supply a spoken-text query with 1 to 40 words.');
-  const {index} = await loadRecord(project, {projectDir, indexId});
+  if (!queryTokens.length || queryTokens.length > 40) fail('Supply a text query with 1 to 40 words.');
+  const {index, directory} = await loadRecord(project, {projectDir, indexId});
+  if (mode === 'screen') {
+    if (!index.options.screenText) fail('Build this video index with screenText: true first.', 'SCREEN_TEXT_NOT_INDEXED');
+    const phrase = ' ' + queryTokens.join(' ') + ' ';
+    const found = [];
+    for (const frame of index.frames) {
+      const line = frame.screenLines.find(line => (' ' + tokens(line).join(' ') + ' ').includes(phrase));
+      if (line !== undefined) found.push({frame, line});
+    }
+    const matches = await Promise.all(found.slice(offset, offset + limit).map(async ({frame, line}) => ({
+      frameId: frame.id, sourceTime: frame.time, text: line, imagePath: await safeDerivedPath(directory, frame.path),
+      sourceStill: {projectDir, expectedRevision: project.revision, assetId: index.assetId, kind: 'still', sourceStart: frame.time, scale: 1},
+      sourcePreview: previewHint(index, frame.time, frame.time),
+    })));
+    const hasMore = offset + matches.length < found.length;
+    return {mode, indexId, assetId: index.assetId, currentRevision: project.revision, query, offset, limit,
+      totalMatches: found.length, hasMore, nextOffset: hasMore ? offset + matches.length : null,
+      sampledFrames: index.frames.length, matches};
+  }
   const wordMap = new Map(index.sourceWords.map((word) => [word.id, word]));
   const matching = [];
   for (const attempt of index.attempts) {

@@ -5,11 +5,11 @@ const contractions = new Map(Object.entries({
   "it's": ['it', 'is'], "here's": ['here', 'is'], "that's": ['that', 'is'], "let's": ['let', 'us'],
   "don't": ['do', 'not'], "doesn't": ['does', 'not'], "can't": ['can', 'not'], "won't": ['will', 'not'],
 }));
-function normalize(text) {
+export function normalizeSpokenWords(text) {
   return (text.normalize('NFKC').toLowerCase().replaceAll('’', "'")
     .match(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu) ?? []).flatMap((token) => contractions.get(token) ?? [token]);
 }
-const sentenceEnd = (text) => /[.!?。！？…][”"'’\)\]\}]*$/u.test(text.trim());
+export const sentenceEnd = (text) => /[.!?。！？…][”"'’\)\]\}]*$/u.test(text.trim());
 const phraseKey = (tokens) => tokens.join('\u0001');
 const hesitationTokens = new Set(['um', 'uh', 'erm', 'hmm', 'okay']);
 function comparisonPrefix(tokens) {
@@ -96,7 +96,7 @@ export function analyzeTakes(transcript, {duration, pauseSeconds = 1.2, minRepea
     if (!Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.start < previousStart) invalid('Transcript word times must be finite, nonnegative and ordered; point and overlapping words are allowed.');
     if (duration !== undefined && word.end > duration + 1e-7) invalid('Transcript word timing exceeds the source duration.');
     previousStart = word.start;
-    normalizedWords.push(normalize(word.text));
+    normalizedWords.push(normalizeSpokenWords(word.text));
   }
   const tokens = [], tokenStarts = [];
   for (const row of normalizedWords) {tokenStarts.push(tokens.length); tokens.push(...row);}

@@ -16,6 +16,7 @@ import {frameContext} from './encoded-review.mjs';
 import {verifyExportQuality} from './export-quality.mjs';
 import {inspectFraming} from './framing-quality.mjs';
 import {applyDeliveryPreset} from './delivery.mjs';
+import {stageScriptCut} from './script-cut.mjs';
 
 const projectDir = z.string().min(1).describe('Absolute path of the local video project directory');
 const expectedRevision = z.number().int().nonnegative().describe('Revision returned by project_inspect. Prevents overwriting newer edits.');
@@ -124,6 +125,11 @@ async function renderJob(args, sourcePreview = false) {
   return startJob(args.projectDir, {...args, outputPath, type: 'render', ...(sourcePreview ? {sourcePreview: true} : {})});
 }
 export const toolDefinitions = [
+  {name: 'script_cut_draft', description: 'Assemble a previewable first cut in supplied script order from timed transcripts in one or several recordings, including repeated takes within one file. Stage only. Provisional full-wording matches favor complete passages, with the earliest usable occurrence breaking ties. Report missing lines, questionable timing and alternative take numbers. To swap a take, repeat the request with take on that line. Use preview_render with the draftId before applying. Intended for initial main-track assembly.',
+    schema: {projectDir, expectedRevision, assetIds: z.array(z.string().min(1)).min(1).max(100),
+      lines: z.array(z.object({text: z.string().trim().min(1).max(2000),
+        take: z.number().int().positive().optional().describe('One-based occurrence in recording list and source-time order.')}).strict()).min(1).max(200)},
+    annotations: edit, run: stageScriptCut},
   {name: 'graphic_presets', description: 'List reusable title, lower-third and callout styles. Add a text overlay with preset and override its style or motion as needed.', schema: {}, annotations: ro, run: () => GRAPHIC_PRESETS},
   {name: 'draft_stage', description: 'Prepare a validated edit without changing the saved project. Render it using preview_render with draftId, then apply the exact reviewed state with draft_apply.',
     schema: {projectDir, expectedRevision, name: z.string().optional(), operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
@@ -178,8 +184,9 @@ export const toolDefinitions = [
       const updated = await applyOperations(dir, {expectedRevision: revision, operations});
       return {asset, revision: updated.revision};
     }},
-  {name: 'media_index', description: 'Map one original recording, including multiple attempts recorded in the same file. Creates timestamped thumbnails/contact sheets for video, links existing source transcript words, and groups repeated passages as POSSIBLE retakes. Never chooses the best take, splits the source, changes the edit or deletes footage. Returns a durable job ID; read job_get for the index ID. Does not transcribe automatically: use transcribe or transcript_import first for spoken take grouping. Missing transcripts allow video picture maps without spoken grouping. Reuses a cached map when source, transcript and options match.',
-    schema: {projectDir, expectedRevision, assetId: z.string(), intervalSeconds: z.number().min(1).max(120).default(15),
+  {name: 'media_index', description: 'Map one original recording, including multiple attempts in the same file. Set screenText:true on macOS to index visible text locally, including in silent screen recordings. Creates timestamped thumbnails/contact sheets for video, links existing source transcript words, and groups repeated passages as POSSIBLE retakes. Never chooses the best take, splits the source, changes the edit or deletes footage. Returns a durable job ID; read job_get for the index ID. Does not transcribe automatically: use transcribe or transcript_import first for spoken take grouping. Missing transcripts allow video picture maps without spoken grouping. Reuses a cached map when source, transcript and options match.',
+    schema: {projectDir, expectedRevision, assetId: z.string(), screenText: z.boolean().default(false).describe('Read on-screen words from sampled video frames locally with Apple Vision on macOS. Use media_search with mode screen.'),
+      intervalSeconds: z.number().min(1).max(120).optional().describe('Default 2 seconds with screenText, otherwise 15. The thumbnail cap can widen spacing.'),
       maxThumbnails: z.number().int().min(6).max(240).default(120)}, annotations: edit,
     run: async args => {
       const project = await loadProject(args.projectDir);
@@ -194,8 +201,9 @@ export const toolDefinitions = [
       limit: z.number().int().min(1).max(50).default(20), sheetPage: z.number().int().nonnegative().default(0),
       includePreview: z.boolean().default(true)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {readMediaIndex} = await import('./footage-index.mjs'); return readMediaIndex(project, args);}},
-  {name: 'media_search', description: 'Search words spoken in an indexed source recording and find source-time ranges plus possible alternative attempts. This is lexical transcript search, not semantic image search or automatic best-take selection. Use returned preview hints with source_preview to compare actual delivery before editing.',
-    schema: {projectDir, indexId: z.string(), query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
+  {name: 'media_search', description: 'Search spoken words and possible alternatives, or select mode screen to find visible words in an index built with screenText. Screen results include sampled timestamps, matched text and preview images. Use source_preview to inspect the original.',
+    schema: {projectDir, indexId: z.string(), mode: z.enum(['spoken','screen']).default('spoken'), includePreview: z.boolean().default(true),
+      query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
   {name: 'edit_apply', description: 'Apply a complete validated batch as one revision. Timeline controls: set_clips, insert_clip, replace_clip, insert_gap, set_gap, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words. Word cuts require measured boundaries. Preview flagged words and use a verified source range. set_transition overlaps retained clips with an incoming crossfade, dip, wipe or slide and shortens output. A slide accepts motionBlur:true for a blurred push from the right. set_clip_visual controls crop, focus, fit, position and timed motion keyframes. set_clip_audio controls independent source bounds/offset, gain, role, fades and volume envelope; patch:null restores linked sound. set_audio controls voice/music/effects gains, optional music ducking, voice noise reduction and automatic loudness. upsert_overlay adds media or reusable title/lower_third/callout text. set_caption_overrides replaces display text or line/page breaks by source word IDs while retaining automatic timing and highlighting through edits; it applies to every use of those source words and leaves transcripts/audio unchanged. Pass overrides:[] to clear. Fixed set_caption_cues take precedence; cues:null returns to automatic pages. Interrupted grouped corrections return captionOverrideReview findings. Also supports remove_overlay, set_captions, set_settings, set_custom, set_asset_color and set_clip_color. Use draft_stage for a proposal preview. Invalid or stale batches leave the project unchanged. Originals are preserved.',

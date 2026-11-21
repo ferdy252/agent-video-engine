@@ -95,6 +95,16 @@ test('real MCP maps repeated takes in one continuous source, searches alternativ
     const {asset: {id: assetId}} = await call('media_add', {projectDir, expectedRevision: 0, path: source, addToTimeline: true});
     await call('transcript_import', {projectDir, expectedRevision: 1, assetId, path: transcriptPath});
     const beforeIndex = await readFile(manifest, 'utf8');
+    const script = await call('script_cut_draft', {projectDir, expectedRevision: 2, assetIds: [assetId], lines: [
+      {text: 'Save your work before you save time.', take: 2}, {text: 'The battery lasts several hours on a charge.'},
+    ]});
+    assert.equal(script.status, 'complete');
+    assert.equal(script.lines[0].totalTakes, 3);
+    assert.equal(script.lines[0].selected.firstWordId, fixture.wordGroups[1][0].id);
+    const rough = await wait(await call('preview_render', script.preview));
+    assert.equal(rough.status, 'completed', JSON.stringify(rough.error));
+    assert.equal(rough.result.durationInFrames, script.preview.toFrame + 1);
+    assert.equal(await readFile(manifest, 'utf8'), beforeIndex);
     const options = {projectDir, expectedRevision: 2, assetId, intervalSeconds: 1, maxThumbnails: 24};
     const indexed = await complete(options);
     assert.equal(indexed.assetId, assetId);

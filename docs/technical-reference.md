@@ -113,9 +113,10 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `project_open_bundle` | `bundleDir`, new `projectDir`; verify and open a portable copy as a job |
 | `media_add` | `projectDir`, `expectedRevision`, local `path`, optional `addToTimeline` |
 | `media_relink` | `projectDir`, `expectedRevision`, `replacements` with `{assetId, path}` entries |
-| `media_index` | `projectDir`, `expectedRevision`, `assetId`; optional `intervalSeconds`, `maxThumbnails` |
+| `media_index` | `projectDir`, `expectedRevision`, `assetId`; optional `intervalSeconds`, `maxThumbnails`, `screenText` (macOS video) |
 | `media_index_get` | `projectDir`, `indexId`; optional `offset`, `limit`, `sheetPage`, `includePreview` |
-| `media_search` | `projectDir`, `indexId`, spoken-word `query`; optional `offset`, `limit` |
+| `media_search` | `projectDir`, `indexId`, `query`; optional `mode` (`spoken` or `screen`), `includePreview`, `offset`, `limit` |
+| `script_cut_draft` | `projectDir`, `expectedRevision`, ordered `assetIds`, ordered `lines` with supplied `text` and optional one-based `take` |
 | `transcript_import` | `projectDir`, `expectedRevision`, `assetId`, local JSON `path` |
 | `transcript_search` | `projectDir`, `assetId`, optional `query`, `offset`, `limit` |
 | `transcribe` | `projectDir`, `expectedRevision`, `assetId`, optional `modelPath`, `language` |
@@ -192,9 +193,32 @@ The text map uses an existing transcript. Run `transcribe` or `transcript_import
 
 Video maps sample across the recording and near attempted passages. They adapt sampling when needed to keep at most `maxThumbnails` images. The default is 120, configurable from 6 to 240; `intervalSeconds` supports 1 to 120 seconds. Samples are representative source previews, not a claim that every visual scene change has been detected. Contact sheets keep their source timestamp labels and are returned as bounded JPEG pages through MCP. Audio assets receive a text map without image previews.
 
-`media_index_get` and `media_search` support `offset` and `limit` (default 20, maximum 50). `sheetPage` selects a contact sheet independently of the text page. Set `includePreview: false` to read metadata without inline images. `media_search` searches words actually present in the transcript and returns source ranges plus possible alternatives; it does not perform semantic image search. Match `text` and `wordIds` identify matching source entries, while `contextText` provides surrounding speech separately.
+`media_index_get` and `media_search` support `offset` and `limit` (default 20, maximum 50). `sheetPage` selects a contact sheet independently of the text page. Set `includePreview: false` to read metadata without inline images. In its default spoken mode, `media_search` searches words actually present in the transcript and returns source ranges plus possible alternatives; it does not perform semantic image search. Match `text` and `wordIds` identify matching source entries, while `contextText` provides surrounding speech separately.
 
 Indexes are private derived files under `.engine/indexes/`. Cache identity includes the source content fingerprint, transcript words and timings, asset/project identity, sampling options and algorithm version. Normal timeline edits can reuse the same map. Changed source media or transcript makes an old map stale; build a new index before using it. Missing transcripts are reported explicitly: video receives a visual-only map, while audio receives metadata only. Neither triggers a hidden model download or transcription call. Cancellation removes partial work. No original media is copied into the index.
+
+### Search visible words in a screen recording
+
+On macOS, call `media_index` with `screenText: true` for each source video. Poll `job_get` for its index ID. The editor reads unlabelled source frames with Apple Vision through the system JavaScript runner. Larger frames are scaled to fit within 2160 pixels per side. The temporary recognition pictures are removed after indexing. Recognized text, timestamps and normal previews are kept locally with the project. This works with silent videos and needs no transcript or model download.
+
+Call `media_search` with that `indexId`, `mode: "screen"` and a query such as `"Back Tap"`. Matches include the recognized line, source time, local thumbnail, full-resolution `sourceStill` arguments and a short source-preview range. Pass `sourceStill` to `source_preview` to inspect small labels. MCP displays the first matching picture on each results page unless `includePreview: false`. The search matches consecutive normalized words in a recognized line. The default sample interval is two seconds for screen text and 15 seconds otherwise. The sample cap can increase spacing in long recordings. Check adjacent source frames for the actual action. A missing match can mean text was brief, blurred or misread.
+
+### Assemble a first cut from a supplied script
+
+Transcribe or import source-timed words for each intended recording. Pass one file with many takes, or list several asset IDs in the desired take-search order. Supply the spoken script as ordered sentences or short phrases. For example:
+
+```json
+{
+  "projectDir": "/absolute/path/to/project",
+  "expectedRevision": 4,
+  "assetIds": ["camera", "pickup"],
+  "lines": [{"text": "Here is the trick.", "take": 2}, {"text": "Open Settings."}]
+}
+```
+
+`script_cut_draft` stages a replacement main track and preserves the saved edit. It matches full normalized wording within each original transcript, including common contractions. Each line uses one continuous source range. Candidate numbers follow the order of the listed assets, then source time. A provisional pick favors a usable match bounded by pauses, sentence endings or the ends of a recording. Ties go to the first usable occurrence. Explicit choices are reserved first, so repeated script lines cannot accidentally reuse the same source range. The result shows the number of matches, the first eight candidates and any explicit selection outside that page. Supply a different take number to stage a revised draft.
+
+The result marks unresolved lines and reports `partial` if only some can be staged, or `no_draft` if none can. A long pause inside a line or uncertain cut endpoints require review. Questionable interior word timing is reported even when both cut endpoints are usable. Preview the actual recording for unclear or differently worded lines and confirm boundaries before a manual edit. Adjacent lines from the same uninterrupted take keep their original pause. New clips use short handles within the neighboring measured speech boundaries. This is an initial assembly tool for the engine timeline, before adding fixed-time graphics or independent sound. Use the returned `preview` arguments with `preview_render` to play the entire draft, poll `job_get` for the MP4, then use `draft_apply` to keep it.
 
 ## Saved color controls
 
