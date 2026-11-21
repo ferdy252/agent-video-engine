@@ -62,6 +62,7 @@ function timelineSummary(project) {
     durationSeconds: timeline.durationInFrames / timeline.fps,
     clipCount: project.clips.length,
     overlayCount: project.overlays.length,
+    ...(timeline.wordActionReview ? {wordActionReview: timeline.wordActionReview} : {}),
   };
 }
 

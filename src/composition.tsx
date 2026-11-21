@@ -2,7 +2,7 @@ import React, {createContext, useContext, useId} from 'react';
 import {TransitionSeries, linearTiming} from '@remotion/transitions';
 import {slide} from '@remotion/transitions/slide';
 import {colorTransform} from './color-settings.mjs';
-import {hasSourceCrop, motionStyle, transitionStyle, GRAPHIC_PRESETS} from './edit-controls.mjs';
+import {hasSourceCrop, motionStyle, transitionStyle, GRAPHIC_PRESETS, valueAt, screenFocusRamp, screenFocusAmount, SCREEN_LABEL_PADDING} from './edit-controls.mjs';
 import {volumeAt} from './audio-settings.mjs';
 import {
   AbsoluteFill, Audio, Composition, Img, OffthreadVideo, Sequence,
@@ -157,6 +157,35 @@ function ClipSound({clip, timeline}: {clip: any; timeline: Timeline}) {
     playbackRate={clip.playbackRate ?? 1} volume={gain}/>;
 }
 
+// The footage and its underline share the same fitted source rectangle. Its
+// coordinates stay aligned through letterboxing, cover crops and camera motion.
+function FocusedScreen({asset, overlay, fit, filter, frame, fps, trimBefore}: any) {
+  const {target, zoom = 2, color = '#ffce42'} = overlay.screenFocus;
+  const {x, y, width, height} = target.bounds;
+  const ramp = screenFocusRamp(overlay.screenFocus, overlay.durationInFrames, fps);
+  const t = screenFocusAmount(frame, ramp, overlay.durationInFrames);
+  const aspect = asset.cropDisplaySize.width / asset.cropDisplaySize.height;
+  const fitted = fit === 'cover' ? 'max' : 'min';
+  const baseWidth = `${fitted}(100cqw, ${aspect * 100}cqh)`;
+  const peakWidth = `min(calc(${zoom} * ${baseWidth}), ${100 / (width * SCREEN_LABEL_PADDING)}cqw, ${100 * aspect / (height * SCREEN_LABEL_PADDING)}cqh)`;
+  const w = `calc(${1 - t} * ${baseWidth} + ${t} * ${peakWidth})`;
+  const h = `calc(${w} / ${aspect})`;
+  // Clamp the pan to available space so edge labels never expose extra black.
+  const place = (viewport: string, size: string, center: number) => {
+    const free = `calc(${viewport} - ${size})`;
+    const desired = `calc(.5 * ${free} + ${(.5 - center) * t} * ${size})`;
+    return `clamp(min(0px, ${free}), ${desired}, max(0px, ${free}))`;
+  };
+  const thickness = Math.min(height * .16, .012);
+  return <div style={{position:'absolute', inset:0, overflow:'hidden', containerType:'size'}}>
+    <div style={{position:'absolute', width:w, height:h, left:place('100cqw', w, x + width / 2), top:place('100cqh', h, y + height / 2)}}>
+      <OffthreadVideo src={asset.src} trimBefore={trimBefore} muted style={{...mediaStyle, objectFit:'fill', filter}}/>
+      <div style={{position:'absolute', left:`${x * 100}%`, top:`${Math.min(1 - thickness, y + height) * 100}%`,
+        width:`${width * 100}%`, height:`${thickness * 100}%`, minHeight:1, backgroundColor:color, opacity:t}}/>
+    </div>
+  </div>;
+}
+
 function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
   const frame = useCurrentFrame();
   const color = useMediaColor(overlay.color);
@@ -164,6 +193,19 @@ function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
   const style = overlayStyle(baseStyle, frame, overlay.durationInFrames);
   const moving = motionStyle(overlay.motion, frame, timeline.fps);
   Object.assign(style, {transform: [style.transform, moving.transform].filter(Boolean).join(' '), opacity: Number(style.opacity ?? 1) * moving.opacity});
+  const fill = valueAt(overlay.fill, frame / timeline.fps, 0);
+  const tint = overlay.colors?.findLast((point: {frame: number}) => point.frame <= frame)?.value;
+  if (overlay.preset === 'meter') {
+    const track = style.backgroundColor;
+    return <div style={{...style, backgroundColor:'transparent', display:'flex', flexDirection:'column', justifyContent:'center'}}>
+      <div style={{color:'white', fontFamily:'Arial, sans-serif'}}>{overlay.text}</div>
+      <div style={{position:'relative', backgroundColor:track, height:'32%', overflow:'hidden', borderRadius:999}}>
+        <div style={{height:'100%', width:`${fill * 100}%`, backgroundColor:tint ?? style.color}}/>
+      </div>
+    </div>;
+  }
+  if (overlay.fill?.length) style.clipPath = `inset(0 ${(1 - fill) * 100}% 0 0)`;
+  if (tint) style.color = tint;
   if (overlay.type === 'text') return <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center',
     color: 'white', fontSize: 56, fontFamily: 'Arial, sans-serif', whiteSpace: 'pre-wrap', ...style}}>{overlay.text}</div>;
   const asset = getAsset(timeline, overlay.assetId);
@@ -174,8 +216,10 @@ function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
     volume={f => volumeAt(audio, f / timeline.fps, overlay.durationInFrames / timeline.fps, overlay.volume ?? 1)}/> : null;
   if (overlay.type === 'audio') return sound;
   return <><div style={{...style, overflow: 'hidden'}}><MediaColorDefinition color={color}/>
-    <SourcePicture asset={asset} framing={overlay} fit={baseStyle.objectFit ?? 'contain'} objectPosition={baseStyle.objectPosition}
-      filter={color.filter} trimBefore={trimBefore}/>
+    {overlay.screenFocus ? <FocusedScreen asset={asset} overlay={overlay} fit={baseStyle.objectFit ?? 'contain'} frame={frame}
+      fps={timeline.fps} trimBefore={trimBefore} filter={color.filter}/> :
+      <SourcePicture asset={asset} framing={overlay} fit={baseStyle.objectFit ?? 'contain'} objectPosition={baseStyle.objectPosition}
+        filter={color.filter} trimBefore={trimBefore}/>}
   </div>{sound}</>;
 }
 

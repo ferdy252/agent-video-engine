@@ -4,10 +4,11 @@ import {isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 import {fileFingerprint, run} from './media.mjs';
+import {boundsSchema} from './graphic-controls.mjs';
 import {analyzeTakes} from './take-index.mjs';
 
 const schemaVersion = 1;
-const versionFor = (options) => options?.screenText ? 2 : 1;
+const versionFor = (options) => options?.screenText ? 3 : 1;
 const cellWidth = 320, imageHeight = 180, labelHeight = 24, gap = 4;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = (message, code = 'INVALID_MEDIA_INDEX') => {throw Object.assign(new Error(message), {code});};
@@ -22,7 +23,7 @@ const indexMode = (index) => index.assetType === 'video'
   ? (visualOnly(index) ? 'visual_only' : 'text_and_visual')
   : (index.transcriptStatus === 'available' ? 'text_only' : 'metadata_only');
 
-function optionsFor({screenText = false, intervalSeconds = screenText ? 2 : 15, maxThumbnails = 120}) {
+function optionsFor({screenText = false, intervalSeconds = screenText ? 3 : 15, maxThumbnails = 120}) {
   if (!Number.isFinite(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 120) fail('intervalSeconds must be from 1 to 120.');
   if (!Number.isInteger(maxThumbnails) || maxThumbnails < 6 || maxThumbnails > 240) fail('maxThumbnails must be an integer from 6 to 240.');
   return {intervalSeconds, maxThumbnails, ...(screenText ? {screenText: true} : {})};
@@ -50,8 +51,8 @@ async function assetState(project, assetId, {stale = false} = {}) {
   return {asset, fingerprint, transcript, transcriptFingerprint: transcriptHash(transcript)};
 }
 
-function expectedId(project, assetId, sourceFingerprint, transcriptFingerprint, options) {
-  return hash({algorithmVersion: versionFor(options), projectId: project.id, assetId, sourceFingerprint, transcriptFingerprint, options});
+function expectedId(project, assetId, sourceFingerprint, transcriptFingerprint, options, algorithmVersion = versionFor(options)) {
+  return hash({algorithmVersion, projectId: project.id, assetId, sourceFingerprint, transcriptFingerprint, options});
 }
 
 async function safeDerivedPath(directory, file) {
@@ -70,20 +71,26 @@ async function safeDerivedPath(directory, file) {
   return canonical;
 }
 
+function validScreenLine(line) {
+  return line && typeof line.text === 'string' && (line.bounds === null || boundsSchema.safeParse(line.bounds).success) &&
+    Array.isArray(line.words) && line.words.every(word => word && typeof word.text === 'string' &&
+      (word.bounds === null || boundsSchema.safeParse(word.bounds).success));
+}
+
 function validateRecord(index, project, indexId) {
-  if (!index || index.schemaVersion !== schemaVersion || index.algorithmVersion !== versionFor(index.options) ||
+  if (!index || index.schemaVersion !== schemaVersion || !(index.options?.screenText ? [2, 3] : [1]).includes(index.algorithmVersion) ||
     index.indexId !== indexId || index.projectId !== project.id || !['video', 'audio'].includes(index.assetType) ||
     !['frames', 'contactSheets', 'attempts', 'groups', 'sourceWords'].every((field) => Array.isArray(index[field]))) {
     fail('The saved source index is incomplete or belongs to another project. Rebuild it.', 'MEDIA_INDEX_INCOMPLETE');
   }
   optionsFor(index.options ?? {});
   if (index.options?.screenText && index.frames.some(frame => !Array.isArray(frame.screenLines) ||
-    !frame.screenLines.every(line => typeof line === 'string'))) fail('Incomplete on-screen text. Rebuild this index.', 'MEDIA_INDEX_INCOMPLETE');
+    !(index.algorithmVersion === 2 ? frame.screenLines.every(line => typeof line === 'string') : frame.screenLines.every(validScreenLine)))) fail('Incomplete on-screen text. Rebuild this index.', 'MEDIA_INDEX_INCOMPLETE');
   if (index.frames.length > index.options.maxThumbnails || index.frames.some((frame) =>
     !/^frame-\d{4}$/.test(frame.id) || frame.path !== `${frame.id}.jpg` || !Number.isFinite(frame.time) || frame.time < 0 || frame.time > index.duration) ||
     index.contactSheets.some((sheet, page) => sheet.page !== page || sheet.path !== `sheet-${String(page + 1).padStart(4, '0')}.jpg` ||
       !Array.isArray(sheet.frameIds) || sheet.frameIds.length > 12)) fail('Cached image metadata is invalid. Rebuild the index.', 'MEDIA_INDEX_INCOMPLETE');
-  if (expectedId(project, index.assetId, index.sourceFingerprint, index.transcriptFingerprint, index.options) !== indexId) {
+  if (expectedId(project, index.assetId, index.sourceFingerprint, index.transcriptFingerprint, index.options, index.algorithmVersion) !== indexId) {
     fail('The saved source index does not match its cache identity. Rebuild it.', 'MEDIA_INDEX_INCOMPLETE');
   }
 }
@@ -286,7 +293,9 @@ export async function buildMediaIndex(project, {projectDir, assetId, intervalSec
       const helper = fileURLToPath(new URL('./recognize-screen-text.js', import.meta.url));
       const {stdout} = await run('/usr/bin/osascript', ['-l', 'JavaScript', helper, ...paths], {signal});
       const rows = JSON.parse(stdout);
-      if (rows.length !== paths.length) fail('Apple Vision returned an incomplete batch.', 'SCREEN_TEXT_INCOMPLETE');
+      if (!Array.isArray(rows) || rows.length !== paths.length || rows.some(lines => !Array.isArray(lines) || !lines.every(validScreenLine))) {
+        fail('Apple Vision returned an incomplete batch.', 'SCREEN_TEXT_INCOMPLETE');
+      }
       for (let i = 0; i < paths.length; i++) {
         pendingText[i].screenLines = rows[i];
         await unlink(paths[i]);
@@ -406,6 +415,25 @@ export async function readMediaIndex(project, {projectDir, indexId, offset = 0, 
 
 const tokens = (text) => String(text).normalize('NFKC').replace(/[\u2018\u2019]/g, "'").toLocaleLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
 
+// Keep distinct matches when the same words appear twice in one frame.
+function* matchingRegions(line, query) {
+  const text = typeof line === 'string' ? line : line.text;
+  const words = tokens(text);
+  const boxed = typeof line === 'string' ? [] : line.words.flatMap(word => tokens(word.text).map(token => ({token, bounds: word.bounds})));
+  const aligned = boxed.length === words.length && boxed.every((word, i) => word.token === words[i]);
+  for (let i = 0; i <= words.length - query.length; i++) {
+    if (!query.every((token, j) => words[i + j] === token)) continue;
+    const boxes = aligned ? boxed.slice(i, i + query.length).map(word => word.bounds) : [];
+    let bounds = null;
+    if (boxes.length && boxes.every(Boolean)) {
+      const x = Math.min(...boxes.map(b => b.x)), y = Math.min(...boxes.map(b => b.y));
+      bounds = {x, y, width: Math.max(...boxes.map(b => b.x + b.width)) - x,
+        height: Math.max(...boxes.map(b => b.y + b.height)) - y};
+    } else if (query.length === words.length) bounds = line.bounds ?? null;
+    yield {line: text, bounds};
+  }
+}
+
 /** Lexical search of source speech or separately indexed on-screen text. */
 export async function searchMediaIndex(project, {projectDir, indexId, query, mode = 'spoken', offset = 0, limit = 20} = {}) {
   pagination(offset, limit);
@@ -414,14 +442,14 @@ export async function searchMediaIndex(project, {projectDir, indexId, query, mod
   const {index, directory} = await loadRecord(project, {projectDir, indexId});
   if (mode === 'screen') {
     if (!index.options.screenText) fail('Build this video index with screenText: true first.', 'SCREEN_TEXT_NOT_INDEXED');
-    const phrase = ' ' + queryTokens.join(' ') + ' ';
     const found = [];
-    for (const frame of index.frames) {
-      const line = frame.screenLines.find(line => (' ' + tokens(line).join(' ') + ' ').includes(phrase));
-      if (line !== undefined) found.push({frame, line});
+    for (const frame of index.frames) for (const line of frame.screenLines) {
+      for (const match of matchingRegions(line, queryTokens)) found.push({frame, ...match});
     }
-    const matches = await Promise.all(found.slice(offset, offset + limit).map(async ({frame, line}) => ({
+    const matches = await Promise.all(found.slice(offset, offset + limit).map(async ({frame, line, bounds}) => ({
       frameId: frame.id, sourceTime: frame.time, text: line, imagePath: await safeDerivedPath(directory, frame.path),
+      ...(bounds ? {target: {assetId: index.assetId, sourceTime: frame.time, bounds}} : {target: null,
+        targetHint: index.algorithmVersion === 2 ? 'Rebuild the screen-text index for label coordinates.' : 'Vision could not locate this phrase precisely.'}),
       sourceStill: {projectDir, expectedRevision: project.revision, assetId: index.assetId, kind: 'still', sourceStart: frame.time, scale: 1},
       sourcePreview: previewHint(index, frame.time, frame.time),
     })));

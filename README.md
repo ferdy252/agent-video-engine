@@ -13,7 +13,8 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 - Cut by transcript words, insert pauses and blend neighboring clips. Add a slide transition with optional motion blur. Start sound before the picture changes or let it continue afterward.
 - Reframe footage, adjust its color and animate changes in position, size or opacity.
 - Balance voice, music and effects. Lower music under speech and reduce mild background noise.
-- Correct caption words and line breaks while keeping them synced through later cuts, with word highlighting intact. Add titles, name labels and callouts, or attach graphics to spoken words.
+- Correct caption words and line breaks while keeping them synced through later cuts, with word highlighting intact. Add titles, name labels and callouts, or animate a meter, title or image on individual spoken words. Each action follows its word through later cuts.
+- Zoom in on a real label in a screen recording, underline it as you explain it, and pull back. The editor uses the label position found locally on your Mac.
 - Export vertical, wide or square video, subtitle files and an editable timeline for compatible editors.
 - Move a project with its source media or reconnect a recording that moved.
 - Find isolated picture glitches in an exported MP4 and view the frame between its neighbors.

@@ -1,5 +1,5 @@
 import {compileTimeline} from './timeline.mjs';
-import {valueAt} from './edit-controls.mjs';
+import {valueAt, screenFocusRamp, screenFocusAmount, SCREEN_LABEL_PADDING} from './edit-controls.mjs';
 import {displayGeometry, readVideoGeometry} from './media.mjs';
 
 /** Read actual raster geometry, including old imports that lack rotation/SAR. */
@@ -29,6 +29,16 @@ const pixels = (value, dimension) => {
 // each boundary so holds, trim offsets and subframe keyframes match rendering.
 function candidateFrames(item, first, last, fps) {
   const frames = new Set([first, last]);
+  if (item.screenFocus) {
+    const ramp = screenFocusRamp(item.screenFocus, item.durationInFrames, fps);
+    // Two simultaneous scales can have a peak inside either ramp.
+    if (item.motion?.scale) {
+      for (let i = 1; i < ramp; i++) for (const f of [i, item.durationInFrames - 1 - i]) {
+        if (f >= first && f <= last) frames.add(f);
+      }
+    }
+    for (const frame of [ramp, item.durationInFrames - 1 - ramp]) if (frame >= first && frame <= last) frames.add(frame);
+  }
   for (const points of Object.values(item.motion ?? {})) for (const point of points) {
     const frame = (point.time - (item.motionTimeOffset ?? 0)) * fps;
     for (const near of [Math.floor(frame) - 1, Math.floor(frame), Math.ceil(frame), Math.ceil(frame) + 1]) {
@@ -89,11 +99,16 @@ export function analyzeFraming(project, {timeline = compileTimeline(project), sc
       const {width: displayWidth, height: displayHeight} = displayGeometry(asset);
       const fitScale = (fit === 'cover' ? Math.max : Math.min)(
         box.width / widthFraction / displayWidth, box.height / heightFraction / displayHeight);
+      const focus = item.screenFocus;
+      const focusZoom = focus ? Math.min(focus.zoom ?? 2,
+        box.width / (fitScale * displayWidth * focus.target.bounds.width * SCREEN_LABEL_PADDING),
+        box.height / (fitScale * displayHeight * focus.target.bounds.height * SCREEN_LABEL_PADDING)) : 1;
       let worst = null;
       for (const frame of candidateFrames(item, first, last, timeline.fps)) {
         const time = frame / timeline.fps + (item.motionTimeOffset ?? 0);
         if (valueAt(item.motion?.opacity, time, 1) <= 0) continue;
-        const zoom = valueAt(item.motion?.scale, time, 1);
+        const focusAmount = focus ? screenFocusAmount(frame, screenFocusRamp(focus, item.durationInFrames, timeline.fps), item.durationInFrames) : 0;
+        const zoom = valueAt(item.motion?.scale, time, 1) * (1 + (focusZoom - 1) * focusAmount);
         const enlargement = fitScale * zoom * scale * Math.max(sar, 1);
         if (!worst || enlargement > worst.upscale) worst = {upscale: enlargement, zoom, frame: item.from + frame};
       }

@@ -410,7 +410,7 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
 }
 
 async function assetsForRender(timeline, signal) {
-  const cropped = new Set([...timeline.clips, ...timeline.overlays].filter(hasSourceCrop).map(item => item.assetId));
+  const cropped = new Set([...timeline.clips, ...timeline.overlays].filter(item => hasSourceCrop(item) || item.screenFocus).map(item => item.assetId));
   if (!cropped.size) return timeline.assets;
   const assets = [];
   for (const asset of timeline.assets) {
@@ -450,7 +450,7 @@ export async function renderProject(project, options = {}) {
   if (timeline.custom && timeline.custom.mode !== 'layer' && (project.captions.cues != null || project.captions.wordOverrides?.length ||
     project.clips.some(clip => clip.type === 'gap' || clip.transition || clip.crop || clip.focus || clip.motion ||
       clip.audio?.sourceStart !== undefined || clip.audio?.assetId !== undefined || clip.audio?.offset) ||
-    project.overlays.some(overlay => overlay.preset || overlay.motion || overlay.crop || overlay.focus))) {
+    project.overlays.some(overlay => overlay.preset || overlay.motion || overlay.crop || overlay.focus || overlay.wordActions || overlay.screenFocus))) {
     throw Object.assign(new Error('Saved timeline controls require engine rendering. Adapt custom motion to custom.mode="layer" to use gaps, transitions, framing, motion, independent sound and edited captions.'),
       {code: 'UNSUPPORTED_CUSTOM_EDIT_CONTROLS'});
   }

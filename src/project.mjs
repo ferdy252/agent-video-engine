@@ -8,6 +8,7 @@ import {fileFingerprint} from './media.mjs';
 import {uncertainWordTiming} from './transcribe.mjs';
 import {validateVisual, validateSequence, validateCaptionCues, GRAPHIC_PRESETS} from './edit-controls.mjs';
 import {prepareCaptionOverrides, validateCaptionOverrides} from './caption-overrides.mjs';
+import {overlayAnchors, wordActionsSchema, screenFocusSchema} from './graphic-controls.mjs';
 import {retimeWords} from './timeline.mjs';
 
 export {compileTimeline, retimeWords} from './timeline.mjs';
@@ -158,23 +159,48 @@ export function validateProject(project, {allowMissingAssets = false} = {}) {
   validateSequence(project.clips, project.settings.fps);
   for (const overlay of project.overlays) {
     if (!['text', 'image', 'video', 'audio'].includes(overlay.type)) fail('Invalid overlay type.');
-    number(overlay.start, 'overlay.start', {min: 0});
-    number(overlay.end, 'overlay.end', {min: 0});
-    if (overlay.end <= overlay.start) fail('overlay.end must be greater than start.');
-    if (overlay.anchor !== undefined) {
-      object(overlay.anchor, 'overlay.anchor');
-      string(overlay.anchor.assetId, 'overlay.anchor.assetId');
-      string(overlay.anchor.wordId, 'overlay.anchor.wordId');
-      if (!assets.has(overlay.anchor.assetId)) fail(`Overlay anchor references unknown asset: ${overlay.anchor.assetId}.`);
-      const transcript = project.transcripts.find((entry) => entry.assetId === overlay.anchor.assetId);
-      if (!transcript?.words.some((word) => word.id === overlay.anchor.wordId)) fail(`Overlay anchor references unknown source word: ${overlay.anchor.wordId}.`);
-      if (overlay.anchor.offset !== undefined) number(overlay.anchor.offset, 'overlay.anchor.offset');
+    if (!overlay.wordActions || overlay.start !== undefined || overlay.end !== undefined) {
+      number(overlay.start, 'overlay.start', {min: 0});
+      number(overlay.end, 'overlay.end', {min: 0});
+      if (overlay.end <= overlay.start) fail('overlay.end must be greater than start.');
+    }
+    if (overlay.wordActions !== undefined) {
+      const parsed = wordActionsSchema.safeParse(overlay.wordActions);
+      if (!parsed.success) fail('Invalid wordActions: ' + parsed.error.message);
+      if (!['text', 'image'].includes(overlay.type) || overlay.anchor) fail('Word actions set the timing of a text or image graphic. Put anchors on its steps.');
+      for (const step of overlay.wordActions.steps) {
+        if (overlay.type === 'image' && step.color) fail('A word color controls generated text or a meter fill.');
+        if (Object.keys(overlay.motion ?? {}).some(key => step[key] !== undefined)) {
+          fail('Choose word actions or timed motion for each individual control.');
+        }
+      }
+    }
+    if (overlay.screenFocus !== undefined) {
+      const parsed = screenFocusSchema.safeParse(overlay.screenFocus);
+      if (!parsed.success) fail('Invalid screenFocus: ' + parsed.error.message);
+      const target = overlay.screenFocus.target, start = overlay.sourceStart ?? 0;
+      if (overlay.type !== 'video' || target.assetId !== overlay.assetId ||
+        target.sourceTime < start || target.sourceTime >= start + (overlay.end - overlay.start)) {
+        fail('Screen focus needs a target from the same video, inside the source excerpt.');
+      }
+      if (overlay.crop || overlay.focus || overlay.style?.objectPosition ||
+        !['contain','cover'].includes(overlay.style?.objectFit ?? 'contain')) fail('Screen focus controls the camera. Choose centered contain or cover.');
+      if (Math.floor((overlay.end - overlay.start) * project.settings.fps + 1e-7) < 3) fail('Screen focus needs at least three output frames.');
+    }
+    for (const anchor of overlayAnchors(overlay)) {
+      object(anchor, 'overlay.anchor');
+      string(anchor.assetId, 'anchor.assetId');
+      string(anchor.wordId, 'anchor.wordId');
+      if (!assets.has(anchor.assetId)) fail(`Overlay anchor references unknown asset: ${anchor.assetId}.`);
+      const transcript = project.transcripts.find((entry) => entry.assetId === anchor.assetId);
+      if (!transcript?.words.some((word) => word.id === anchor.wordId)) fail(`Overlay anchor references unknown source word: ${anchor.wordId}.`);
+      if (anchor.offset !== undefined) number(anchor.offset, 'anchor.offset');
       // Keep a clip-specific anchor when that clip is removed, so restoring the
       // edit restores the attachment. Compilation suppresses absent occurrences.
-      if (overlay.anchor.clipId !== undefined) {
-        string(overlay.anchor.clipId, 'overlay.anchor.clipId');
-        const anchoredClip = project.clips.find((entry) => entry.id === overlay.anchor.clipId);
-        if (anchoredClip && (anchoredClip.audio?.assetId ?? anchoredClip.assetId) !== overlay.anchor.assetId) fail('Overlay anchor clip must use the anchored spoken source asset.');
+      if (anchor.clipId !== undefined) {
+        string(anchor.clipId, 'anchor.clipId');
+        const anchoredClip = project.clips.find((entry) => entry.id === anchor.clipId);
+        if (anchoredClip && (anchoredClip.audio?.assetId ?? anchoredClip.assetId) !== anchor.assetId) fail('Overlay anchor clip must use the anchored spoken source asset.');
       }
     }
     if (overlay.type === 'text') string(overlay.text, 'overlay.text');
@@ -183,7 +209,8 @@ export function validateProject(project, {allowMissingAssets = false} = {}) {
       if (!asset) fail(`Overlay references unknown asset: ${overlay.assetId}.`);
       if (asset.type !== overlay.type) fail('Overlay type must match its asset type.');
       const sourceStart = overlay.sourceStart ?? 0;
-      sourceBounds(asset, sourceStart, sourceStart + overlay.end - overlay.start, `overlay ${overlay.id}`);
+      if (overlay.wordActions) number(sourceStart, 'overlay.sourceStart', {min: 0});
+      else sourceBounds(asset, sourceStart, sourceStart + (overlay.end - overlay.start), `overlay ${overlay.id}`);
     }
     if (overlay.volume !== undefined) number(overlay.volume, 'overlay.volume', {min: 0, max: 8});
     if (overlay.audio !== undefined) {
@@ -359,7 +386,7 @@ function findClip(project, id) {
 }
 // Track only the scoped anchors that existed when this occurrence was split.
 function trackSplitAnchors(project, leftId, rightId, splitAnchors) {
-  for (const {anchor} of project.overlays) {
+  for (const anchor of project.overlays.flatMap(overlayAnchors)) {
     if (!anchor?.clipId) continue;
     const candidates = splitAnchors.get(anchor);
     if (anchor.clipId !== leftId && !candidates?.has(leftId)) continue;
@@ -369,7 +396,7 @@ function trackSplitAnchors(project, leftId, rightId, splitAnchors) {
 }
 
 function resolveSplitAnchors(project, splitAnchors) {
-  const pending = project.overlays.map(overlay => overlay.anchor).filter(anchor => splitAnchors.has(anchor));
+  const pending = project.overlays.flatMap(overlayAnchors).filter(anchor => splitAnchors.has(anchor));
   if (!pending.length) return;
   const words = retimeWords(project);
   for (const anchor of pending) {

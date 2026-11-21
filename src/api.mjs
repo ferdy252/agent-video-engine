@@ -5,6 +5,7 @@ import {randomUUID} from 'node:crypto';
 import {createProject, loadProject, applyOperations, restoreRevision, listRevisions, validateProject, readProjectRevision} from './project.mjs';
 import {stageDraft, inspectDraft, listDrafts, applyDraft, deleteDraft, compareProjectSnapshots, getDraft} from './drafts.mjs';
 import {GRAPHIC_PRESETS, MOTION_LIMITS} from './edit-controls.mjs';
+import {anchorSchema, wordActionsSchema, screenFocusSchema} from './graphic-controls.mjs';
 import {compileTimeline} from './timeline.mjs';
 import {probeAsset, doctor, assertAssets} from './media.mjs';
 import {normalizeTranscript, uncertainWordTiming} from './transcribe.mjs';
@@ -66,10 +67,14 @@ const cueSchema = z.object({id: z.string(), text: z.string().min(1), start: z.nu
 const captionPatch = z.object({enabled: z.boolean().optional(), fontSize: z.number().positive().optional(), color: z.string().optional(),
   highlightColor: z.string().optional(), bottom: z.number().nonnegative().optional(), wordsPerPage: z.number().int().min(1).max(50).optional(), cues: z.array(cueSchema).max(100000).nullable().optional()}).strict();
 const overlaySchema = z.object({id: z.string(), type: z.enum(['text', 'image', 'video', 'audio']), text: z.string().optional(),
-  assetId: z.string().optional(), start: z.number().nonnegative(), end: z.number().positive(), sourceStart: z.number().nonnegative().optional(),
+  assetId: z.string().optional(), start: z.number().nonnegative().optional(), end: z.number().positive().optional(), sourceStart: z.number().nonnegative().optional(),
   volume: z.number().min(0).max(8).optional(), style: z.record(z.unknown()).optional(),
-  audio: clipAudioPatch.optional(), motion: motionSchema.optional(), crop: cropSchema.optional(), focus: focusSchema.optional(), preset: z.enum(['title', 'lower_third', 'callout']).optional(),
-  anchor: z.object({assetId: z.string(), wordId: z.string(), offset: z.number().optional(), clipId: z.string().optional()}).strict().optional()}).strict();
+  audio: clipAudioPatch.optional(), motion: motionSchema.optional(), crop: cropSchema.optional(), focus: focusSchema.optional(), preset: z.enum(['title', 'lower_third', 'callout', 'meter']).optional(),
+  wordActions: wordActionsSchema.optional(), screenFocus: screenFocusSchema.optional(),
+  anchor: anchorSchema.optional()}).strict().refine(overlay =>
+    (overlay.start !== undefined && overlay.end !== undefined) ||
+    (overlay.wordActions && overlay.start === undefined && overlay.end === undefined),
+    'Supply start and end for an overlay, or time a graphic with wordActions.');
 const customSchema = z.union([
   z.object({mode: z.literal('layer'), entryPoint: z.string(), exportName: z.string().optional(), publicDir: z.string().optional(),
     props: z.record(z.unknown()).optional()}).strict(),
@@ -112,6 +117,7 @@ async function inspect({projectDir: dir, includeTimeline = false}) {
   const timeline = compileTimeline(project);
   return {...project, audio: resolveAudioSettings(project.audio), transcripts: project.transcripts.map(({words, ...rest}) => ({...rest, wordCount: words.length})),
     durationInFrames: timeline.durationInFrames, duration: timeline.durationInFrames / timeline.fps,
+    ...(timeline.wordActionReview ? {wordActionReview: timeline.wordActionReview} : {}),
     ...(includeTimeline ? {timeline} : {})};
 }
 async function renderJob(args, sourcePreview = false) {
@@ -130,7 +136,7 @@ export const toolDefinitions = [
       lines: z.array(z.object({text: z.string().trim().min(1).max(2000),
         take: z.number().int().positive().optional().describe('One-based occurrence in recording list and source-time order.')}).strict()).min(1).max(200)},
     annotations: edit, run: stageScriptCut},
-  {name: 'graphic_presets', description: 'List reusable title, lower-third and callout styles. Add a text overlay with preset and override its style or motion as needed.', schema: {}, annotations: ro, run: () => GRAPHIC_PRESETS},
+  {name: 'graphic_presets', description: 'List reusable title, lower-third, callout and meter styles. Add a text overlay with preset and override its style or motion as needed.', schema: {}, annotations: ro, run: () => GRAPHIC_PRESETS},
   {name: 'draft_stage', description: 'Prepare a validated edit without changing the saved project. Render it using preview_render with draftId, then apply the exact reviewed state with draft_apply.',
     schema: {projectDir, expectedRevision, name: z.string().optional(), operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: ({projectDir: dir, ...request}) => stageDraft(dir, request)},
@@ -201,15 +207,16 @@ export const toolDefinitions = [
       limit: z.number().int().min(1).max(50).default(20), sheetPage: z.number().int().nonnegative().default(0),
       includePreview: z.boolean().default(true)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {readMediaIndex} = await import('./footage-index.mjs'); return readMediaIndex(project, args);}},
-  {name: 'media_search', description: 'Search spoken words and possible alternatives, or select mode screen to find visible words in an index built with screenText. Screen results include sampled timestamps, matched text and preview images. Use source_preview to inspect the original.',
+  {name: 'media_search', description: 'Search spoken words and possible alternatives, or select mode screen to find visible words in an index built with screenText. Screen results include sampled timestamps, matched text, preview images and a normalized target for screenFocus when Vision locates the phrase. Use source_preview to inspect the original.',
     schema: {projectDir, indexId: z.string(), mode: z.enum(['spoken','screen']).default('spoken'), includePreview: z.boolean().default(true),
       query: z.string().trim().min(1), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20)}, annotations: ro,
     run: async args => {const project = await loadProject(args.projectDir); const {searchMediaIndex} = await import('./footage-index.mjs'); return searchMediaIndex(project, args);}},
-  {name: 'edit_apply', description: 'Apply a complete validated batch as one revision. Timeline controls: set_clips, insert_clip, replace_clip, insert_gap, set_gap, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words. Word cuts require measured boundaries. Preview flagged words and use a verified source range. set_transition overlaps retained clips with an incoming crossfade, dip, wipe or slide and shortens output. A slide accepts motionBlur:true for a blurred push from the right. set_clip_visual controls crop, focus, fit, position and timed motion keyframes. set_clip_audio controls independent source bounds/offset, gain, role, fades and volume envelope; patch:null restores linked sound. set_audio controls voice/music/effects gains, optional music ducking, voice noise reduction and automatic loudness. upsert_overlay adds media or reusable title/lower_third/callout text. set_caption_overrides replaces display text or line/page breaks by source word IDs while retaining automatic timing and highlighting through edits; it applies to every use of those source words and leaves transcripts/audio unchanged. Pass overrides:[] to clear. Fixed set_caption_cues take precedence; cues:null returns to automatic pages. Interrupted grouped corrections return captionOverrideReview findings. Also supports remove_overlay, set_captions, set_settings, set_custom, set_asset_color and set_clip_color. Use draft_stage for a proposal preview. Invalid or stale batches leave the project unchanged. Originals are preserved.',
+  {name: 'edit_apply', description: 'Apply a complete validated batch as one revision. Timeline controls: set_clips, insert_clip, replace_clip, insert_gap, set_gap, split_clip, remove_clip, trim_clip, reorder_clips, delete_source_range, delete_words. Word cuts require measured boundaries. Preview flagged words and use a verified source range. set_transition overlaps retained clips with an incoming crossfade, dip, wipe or slide and shortens output. A slide accepts motionBlur:true for a blurred push from the right. set_clip_visual controls crop, focus, fit, position and timed motion keyframes. set_clip_audio controls independent source bounds/offset, gain, role, fades and volume envelope; patch:null restores linked sound. set_audio controls voice/music/effects gains, optional music ducking, voice noise reduction and automatic loudness. upsert_overlay adds media or title/lower_third/callout/meter text. wordActions.steps ties motion, fill and color changes on one graphic to individual spoken words. screenFocus on a video overlay zooms to and underlines a target from a screen search; anchor it to narration. set_caption_overrides replaces display text or line/page breaks by source word IDs while retaining automatic timing and highlighting through edits; it applies to every use of those source words and leaves transcripts/audio unchanged. Pass overrides:[] to clear. Fixed set_caption_cues take precedence; cues:null returns to automatic pages. Interrupted grouped corrections return captionOverrideReview findings. Also supports remove_overlay, set_captions, set_settings, set_custom, set_asset_color and set_clip_color. Use draft_stage for a proposal preview. Invalid or stale batches leave the project unchanged. Originals are preserved.',
     schema: {projectDir, expectedRevision, operations: z.array(operationSchema).min(1).max(1000)}, annotations: edit,
     run: async ({projectDir: dir, ...request}) => {const project = await applyOperations(dir, request); const timeline = compileTimeline(project);
       return {revision: project.revision, clips: project.clips, durationInFrames: timeline.durationInFrames,
+        ...(timeline.wordActionReview ? {wordActionReview: timeline.wordActionReview} : {}),
         ...(timeline.captionOverrideReview ? {captionOverrideReview: timeline.captionOverrideReview} : {})};}},
   {name: 'revision_list', description: 'List saved edit revisions.', schema: {projectDir}, annotations: ro, run: ({projectDir: dir}) => listRevisions(dir)},
   {name: 'revision_restore', description: 'Restore a saved revision as a new revision. Keeps history and original footage.',

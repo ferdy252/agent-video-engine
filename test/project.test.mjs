@@ -267,3 +267,45 @@ test('invalid overlay word anchors reject the batch without creating a revision'
   ]}), {code: 'VALIDATION_ERROR'});
   assert.equal((await loadProject(projectDir)).revision, 0);
 });
+
+test('a word-driven graphic follows its scoped occurrence through splits, speed and intervening cuts', async t => {
+  const anchor = wordId => ({assetId:'a',wordId,clipId:'c'});
+  const steps = [{anchor:anchor('w1'),fill:0}, {anchor:anchor('w3'),fill:.5,color:'#ffaa00'}];
+  const {projectDir} = await fixture(t, {clips:[
+    {id:'other',assetId:'a',sourceStart:0,sourceEnd:9},
+    {id:'c',assetId:'a',sourceStart:0,sourceEnd:9,playbackRate:2}],
+    overlays:[{id:'meter',type:'text',preset:'meter',text:'Capacity',start:0,end:1,wordActions:{steps,holdSeconds:.5}}]});
+  const edit = (expectedRevision, operations) => applyOperations(projectDir,{expectedRevision,operations});
+  let p = await edit(0,[{type:'split_clip',clipId:'c',sourceTime:4,newClipId:'right'}]);
+  assert.equal(p.overlays[0].wordActions.steps[1].anchor.clipId,'right');
+  assert.deepEqual(compileTimeline(p).overlays[0].actionFrames,[285,360]);
+  p = await edit(1,[{type:'trim_clip',clipId:'c',sourceStart:0,sourceEnd:2}]);
+  const [graphic] = compileTimeline(p).overlays;
+  assert.deepEqual(graphic.actionFrames,[285,330]);
+  assert.equal(graphic.durationInFrames,60);
+  p = await edit(2,[{type:'reorder_clips',clipIds:['right','c','other']}]);
+  assert.equal(compileTimeline(p).wordActionReview[0].reason,'words_out_of_order_or_same_frame');
+  p = await edit(3,[{type:'remove_clip',clipId:'right'}]);
+  assert.equal(compileTimeline(p).overlays.length,0);
+  assert.equal(compileTimeline(p).wordActionReview[0].anchor.wordId,'w3');
+});
+
+test('invalid cue channels and mismatched screen excerpt targets reject the entire edit', async t => {
+  const {projectDir} = await fixture(t);
+  const anchor = {assetId:'a', wordId:'w1'};
+  const meter = {id:'g', type:'text', text:'Capacity', wordActions:{steps:[{anchor,fill:0}]}};
+  const focus = {id:'v', type:'video', assetId:'a', start:0, end:2, sourceStart:3,
+    screenFocus:{target:{assetId:'a',sourceTime:3.5,bounds:{x:.1,y:.4,width:.2,height:.03}}}};
+  for (const invalid of [
+    {...meter,wordActions:{steps:[{anchor,fill:1.1}]}},
+    {...meter,wordActions:{steps:[{anchor}]}},
+    {...focus,screenFocus:{target:{...focus.screenFocus.target,assetId:'another'}}},
+    {...focus,screenFocus:{target:{...focus.screenFocus.target,sourceTime:5}}},
+    {...focus,screenFocus:{target:{...focus.screenFocus.target,bounds:{x:.9,y:.2,width:.4,height:.1}}}},
+  ]) {
+    await assert.rejects(applyOperations(projectDir,{expectedRevision:0,operations:[
+      {type:'upsert_overlay',overlay:meter},{type:'upsert_overlay',overlay:invalid},
+    ]}),{code:'VALIDATION_ERROR'});
+  }
+  assert.deepEqual((await loadProject(projectDir)).overlays,[]);
+});

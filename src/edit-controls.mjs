@@ -55,6 +55,19 @@ export function valueAt(points, seconds, fallback = 0) {
   }
   return points.at(-1).value;
 }
+// Reserve room for the underline and a little space around the matched words.
+export const SCREEN_LABEL_PADDING = 1.1;
+
+// Both endpoints are the original framing, including on short inserts.
+export function screenFocusRamp(focus, duration, fps) {
+  return Math.min(Math.max(1, Math.round((focus.rampSeconds ?? .3) * fps)), Math.floor((duration - 1) / 2));
+}
+export function screenFocusAmount(frame, ramp, duration) {
+  if (!ramp) return 0;
+  const t = Math.max(0, Math.min(1, frame / ramp, (duration - 1 - frame) / ramp));
+  return t * t * (3 - 2 * t);
+}
+
 export function motionStyle(motion = {}, frame, fps, offset = 0) {
   const t = frame / fps + offset;
   return {transform: `translate(${valueAt(motion.x, t)}px, ${valueAt(motion.y, t)}px) scale(${valueAt(motion.scale, t, 1)}) rotate(${valueAt(motion.rotation, t)}deg)`,
@@ -141,6 +154,7 @@ export function captionCues(words, style, fps) {
 }
 export const GRAPHIC_PRESETS = Object.freeze({
   title: {left: '8%', top: '35%', width: '84%', height: '25%', fontSize: 80, fontWeight: 800, textAlign: 'center', backgroundColor: 'rgba(0,0,0,.65)', padding: 24, borderRadius: 20, fadeInFrames: 6, fadeOutFrames: 6},
+  meter: {left: '10%', top: '68%', width: '80%', height: '12%', fontSize: 38, fontWeight: 700, color: '#54c899', backgroundColor: '#263140'},
   lower_third: {left: '6%', top: '74%', width: '70%', height: '14%', fontSize: 48, fontWeight: 700, textAlign: 'left', backgroundColor: 'rgba(0,0,0,.8)', padding: 24, borderRadius: 12, fadeInFrames: 6, fadeOutFrames: 6},
   callout: {left: '10%', top: '12%', width: '80%', height: '14%', fontSize: 56, fontWeight: 700, color: '#171717', backgroundColor: '#ffde59', padding: 20, borderRadius: 16, fadeInFrames: 4, fadeOutFrames: 4},
 });

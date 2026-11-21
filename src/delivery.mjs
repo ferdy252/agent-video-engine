@@ -70,6 +70,10 @@ export function applyDeliveryPreset(project, {preset, fit = 'contain'} = {}) {
   for (const overlay of snapshot.overlays) {
     if (overlay.type === 'audio') continue;
     scaleMotion(overlay.motion, x, y);
+    for (const step of overlay.wordActions?.steps ?? []) {
+      if (step.x !== undefined) step.x = scaled(step.x, x);
+      if (step.y !== undefined) step.y = scaled(step.y, y);
+    }
     if (!overlay.style) continue;
     for (const [key, factor] of Object.entries(styleFactors)) {
       if (typeof overlay.style[key] === 'number') overlay.style[key] = scaled(overlay.style[key], factor);
@@ -287,7 +291,7 @@ export async function exportTimeline(project, {outputPath, format = 'otio', sign
     'This editable timeline references original files by local URL. Keep them available or relink the media in the receiving editor.',
     'Receiving editors differ in their handling of retimes, crossfades, custom transitions, still images and media timecode.',
     'Dip, wipe and slide transfer their timing and type as custom transitions. Receiving editors may substitute a cut.',
-    'Engine layout, color, keyframes, caption styling, text graphics, audio fades/finishing and custom motion are not rendered into this interchange. Use subtitle sidecars and the MP4 for those results.',
+    'Engine layout, color, keyframes, word-driven graphics, screen-label zooms, caption styling, text graphics, audio fades/finishing and custom motion are not rendered into this interchange. Use subtitle sidecars and the MP4 for those results.',
     'Separate audio tracks carry source audio and J/L timing. Legacy videos with unknown audio metadata retain an audio track, matching the engine renderer. Importers may leave that track empty for picture-only files.',
     'Importers vary in how they restore linked clip selections and engine mix settings.',
   ];

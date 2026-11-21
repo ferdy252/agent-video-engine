@@ -1,6 +1,7 @@
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {resolveColorSettings} from './color-settings.mjs';
 import {clipSeconds, captionCues} from './edit-controls.mjs';
+import {anchorSeconds, compileWordActions} from './graphic-controls.mjs';
 import {applyCaptionOverrides} from './caption-overrides.mjs';
 
 /** Compile one source-linked edit into the common output frame clock. */
@@ -47,21 +48,23 @@ export function compileTimeline(project) {
   }
   const captions = retimeWords(project, clips);
   const displayCaptions = applyCaptionOverrides(captions, project.captions, clips);
+  const wordActionReview = [];
   const overlays = project.overlays.flatMap((overlay) => {
+    if (overlay.wordActions) {
+      const {compiled, issue} = compileWordActions(overlay, captions, fps);
+      if (issue) {wordActionReview.push(issue); return [];}
+      return [{...compiled, color: resolveColorSettings(assets.get(overlay.assetId)?.color)}];
+    }
     let start = overlay.start;
     let end = overlay.end;
     if (overlay.anchor) {
-      const {assetId, wordId, offset = 0, clipId} = overlay.anchor;
-      // Edited order determines the first occurrence when the source is reused.
-      const word = captions.find((entry) => entry.assetId === assetId && entry.id === wordId &&
-        (clipId === undefined || entry.clipId === clipId));
-      if (!word) return [];
-      start = Math.max(0, word.start + offset);
+      start = anchorSeconds(captions, overlay.anchor);
+      if (start === null) return [];
       end = start + overlay.end - overlay.start;
     }
     const from = Math.round(start * fps);
     const asset = assets.get(overlay.assetId);
-    return [{...overlay, start, end, from, durationInFrames: Math.round(end * fps) - from,
+    return [{...overlay, ...(overlay.screenFocus ? {audio: {muted: true, ...overlay.audio}} : {}), start, end, from, durationInFrames: Math.round(end * fps) - from,
       color: resolveColorSettings(asset?.color)}];
   }).filter((overlay) => overlay.durationInFrames > 0);
   const mainEnd = clips.reduce((end, clip) => {
@@ -73,6 +76,7 @@ export function compileTimeline(project) {
   return {
     fps, width, height, durationInFrames, clips, overlays,
     captions,
+    ...(wordActionReview.length ? {wordActionReview} : {}),
     captionCues: captionCues(displayCaptions.words, project.captions, fps),
     ...(project.captions.wordOverrides?.length ? {captionOverrideReview: displayCaptions.review} : {}),
     settings: project.settings,

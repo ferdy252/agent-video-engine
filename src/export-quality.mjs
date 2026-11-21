@@ -98,11 +98,14 @@ const v2Report = legacyReportSchema.extend({schemaVersion: z.literal(2),
       findings: z.array(z.object({code: z.literal('CAPTION_GROUP_INTERRUPTED'), clipId: z.string(), assetId: z.string(),
         wordIds: z.array(z.string()), frame: nonnegativeInteger, message: z.string()}).strict())}).strict().optional(),
   }).strict()});
+const wordActionsCheck = z.object({totalFindings: nonnegativeInteger, findings: z.array(z.object({
+  overlayId: z.string(), step: nonnegativeInteger, reason: z.enum(['word_removed','words_out_of_order_or_same_frame']),
+}).strict()).max(100)}).strict();
 const glitchSchema = z.object({decodedFrames: positiveInteger, totalFindings: nonnegativeInteger,
   findings: z.array(z.object({frame: positiveInteger, seconds: z.number().nonnegative()}).strict()).max(100),
   truncated: z.boolean()}).strict();
 const reportSchema = z.union([legacyReportSchema, v2Report, v2Report.extend({schemaVersion: z.literal(3),
-  checks: v2Report.shape.checks.extend({frameGlitches: glitchSchema.nullable()})})]);
+  checks: v2Report.shape.checks.extend({frameGlitches: glitchSchema.nullable(), wordActions: wordActionsCheck.optional()})})]);
 
 const limitations = [
   'These checks verify technical export properties. Watch the video at delivery size to judge visual quality.',
@@ -251,6 +254,8 @@ function reviewWarnings(report) {
   const glitches = report.checks.frameGlitches;
   if (glitches?.totalFindings) warnings.push({code: 'ISOLATED_FRAMES_REVIEW_REQUIRED', message: `${glitches.totalFindings} isolated frame change(s). Inspect the reported frame and its neighbors in the encoded file.`});
   if (framing.truncated || speechGaps?.truncated || glitches?.truncated) warnings.push({code: 'REVIEW_FINDINGS_TRUNCATED', message: 'The entire export was checked, but the returned findings are capped. Additional review is required.'});
+  if (report.checks.wordActions?.totalFindings) warnings.push({code: 'WORD_ACTIONS_REVIEW_REQUIRED',
+    message: 'A word-timed graphic lost its cue sequence and was omitted. Inspect wordActionReview before sharing.'});
   if (report.checks.captionOverrides?.totalFindings) warnings.push({code: 'CAPTION_OVERRIDES_REVIEW_REQUIRED', message: 'Cuts interrupted a corrected caption phrase. Inspect captionOverrideReview and the displayed retained words.'});
   return warnings;
 }
@@ -309,7 +314,11 @@ export async function buildExportQuality({filePath, project, kind, sourcePreview
   }
   const report = {schemaVersion: 3, purpose: purposeFor(render), revision: nonnegativeInteger.parse(project.revision),
     ...actual, target, render, encoding: encodingFor(kind), sourceResolution: summarizeSourceResolution(project)};
-  report.checks = {framing, speechGaps, frameGlitches, ...(timeline.captionOverrideReview ? {captionOverrides: timeline.captionOverrideReview} : {})};
+  const wordActions = timeline.wordActionReview;
+  report.checks = {framing, speechGaps, frameGlitches,
+    ...(wordActions?.length ? {wordActions: {totalFindings: wordActions.length,
+      findings: wordActions.slice(0, 100).map(({overlayId, step, reason}) => ({overlayId, step, reason}))}} : {}),
+    ...(timeline.captionOverrideReview ? {captionOverrides: timeline.captionOverrideReview} : {})};
   const warnings = reviewWarnings(report);
   signal?.throwIfAborted();
   return reportSchema.parse({...report, status: statusFor(report.purpose, warnings), warnings, limitations: [...currentLimitations]});
@@ -322,6 +331,8 @@ function consistentReport(report) {
   if (sourceResolution.visualAssetCount !== sourceResolution.unknownDimensionsCount +
     sourceResolution.sizes.reduce((total, size) => total + size.count, 0)) return false;
   if (report.schemaVersion === 3) {
+    const wordActions = report.checks.wordActions;
+    if (wordActions && wordActions.findings.length !== Math.min(100, wordActions.totalFindings)) return false;
     const g = report.checks.frameGlitches;
     if (['final', 'preview'].includes(report.purpose) !== Boolean(g)) return false;
     if (g && ((report.measured.frames !== null && g.decodedFrames !== report.measured.frames) ||

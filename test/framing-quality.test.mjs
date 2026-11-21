@@ -94,3 +94,15 @@ test('source preview canvases honor inverted rotation and stay within the suppor
     {width: 4096, height: 16384});
   assert.deepEqual(await sourcePreviewDimensions({type: 'audio'}), {width: 640, height: 360});
 });
+
+test('screen focus measures the held camera and caps zoom to keep a wide label in the picture', () => {
+  const target = {assetId:'camera',sourceTime:1,bounds:{x:.4,y:.5,width:.1,height:.03}};
+  const overlay = {id:'setting',assetId:'camera',type:'video',start:0,end:2,screenFocus:{target,zoom:3}};
+  const p = project({}, {overlays:[overlay]});
+  const [finding] = analyzeFraming(p).findings;
+  assert.equal(finding.motionScale,3);
+  assert.equal(finding.worstFrame,9);
+  assert.equal(analyzeFraming(p,{frameRange:[0,0]}).totalFindings,0);
+  target.bounds = {x:0,y:.5,width:1,height:.03};
+  assert.equal(analyzeFraming(p).totalFindings,0);
+});

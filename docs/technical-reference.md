@@ -201,7 +201,7 @@ Indexes are private derived files under `.engine/indexes/`. Cache identity inclu
 
 On macOS, call `media_index` with `screenText: true` for each source video. Poll `job_get` for its index ID. The editor reads unlabelled source frames with Apple Vision through the system JavaScript runner. Larger frames are scaled to fit within 2160 pixels per side. The temporary recognition pictures are removed after indexing. Recognized text, timestamps and normal previews are kept locally with the project. This works with silent videos and needs no transcript or model download.
 
-Call `media_search` with that `indexId`, `mode: "screen"` and a query such as `"Back Tap"`. Matches include the recognized line, source time, local thumbnail, full-resolution `sourceStill` arguments and a short source-preview range. Pass `sourceStill` to `source_preview` to inspect small labels. MCP displays the first matching picture on each results page unless `includePreview: false`. The search matches consecutive normalized words in a recognized line. The default sample interval is two seconds for screen text and 15 seconds otherwise. The sample cap can increase spacing in long recordings. Check adjacent source frames for the actual action. A missing match can mean text was brief, blurred or misread.
+Call `media_search` with that `indexId`, `mode: "screen"` and a query such as `"Back Tap"`. Matches include the recognized line, source time, matched phrase coordinates in `target` when available, local thumbnail, full-resolution `sourceStill` arguments and a short source-preview range. Pass `sourceStill` to `source_preview` to inspect small labels. MCP displays the first matching picture on each results page unless `includePreview: false`. The search matches consecutive normalized words in a recognized line. Repeated occurrences have separate results. Older indexes still return text and previews. Rebuild with `screenText: true` to obtain coordinates. A partial phrase with uncertain bounds returns `target: null`. The default sample interval is two seconds for screen text and 15 seconds otherwise. The sample cap can increase spacing in long recordings. Check adjacent source frames for the actual action. A missing match can mean text was brief, blurred or misread.
 
 ### Assemble a first cut from a supplied script
 
@@ -395,7 +395,40 @@ For example, `{"assetId":"recorded-voice","sourceStart":1.2,"sourceEnd":3.4,"off
 
 Set `motion` on a main visual clip or overlay using any of `x`, `y`, `scale`, `rotation` and `opacity`. Each control takes ordered `{time, value, easing?}` points. Time is in seconds from the item's output start. Position values use pixels, rotation uses degrees, scale is a multiplier, and opacity is `0` to `1`. `linear`, `easeInOut` and `hold` specify the curve from that point toward the next. For example, `{"scale":[{"time":0,"value":1,"easing":"easeInOut"},{"time":1,"value":1.12}]}` makes a slow zoom over the first second.
 
-`graphic_presets` lists `title`, `lower_third` and `callout`. Set `preset` on a text overlay and use `style` or `motion` to customize it. Standard graphics follow the engine clock. Use a custom layer for more involved animation.
+`graphic_presets` lists `title`, `lower_third`, `callout` and `meter`. Set `preset` on a text overlay and use `style` or `motion` to customize it. Standard graphics follow the engine clock. Use a custom layer for more involved animation.
+
+### Animate a graphic on individual spoken words
+
+Add one text or image overlay with `wordActions`. Its first cue determines when it appears. Each subsequent cue specifies the state at that word. The final state remains visible for `holdSeconds` (default 0.8 seconds, minimum one visible frame). Each cue accepts a source `assetId` and `wordId`, an optional `clipId` for a specific take, and an optional offset in seconds. The words may come from different recordings.
+
+```json
+{"type":"upsert_overlay","overlay":{
+  "id":"capacity","type":"text","preset":"meter","text":"Capacity",
+  "wordActions":{"holdSeconds":1,"steps":[
+    {"anchor":{"assetId":"voice","wordId":"w14"},"fill":0,"color":"#54c899","easing":"easeInOut"},
+    {"anchor":{"assetId":"voice","wordId":"w19"},"fill":0.5,"color":"#ffaa00"}
+  ]}
+}}
+```
+
+The meter fills between the two words, changes color at the second word and holds at half. A text or image overlay can use `fill` for a left-to-right reveal. Text and meter graphics accept hex colors. All three support `x`, `y`, `scale`, `rotation` and `opacity`. Each numeric channel interpolates between its own cues using the earlier cue's easing. Color switches on its cue. Other channels may still use ordinary motion keyframes.
+
+Omit overlay `start`, `end` and `anchor` when using word actions. Inspect `timeline.overlays[].actionFrames` for the resolved output frames. Splits, trims and speed changes recompile the sequence. If a required word disappears, or its edited position would reverse or collapse the sequence, the editor omits that graphic and reports the affected cue in `wordActionReview`. Adjust the anchors or restore the words to recover it.
+
+### Zoom in and underline a real screen label
+
+Find the label using a screen-text search. Copy a match's entire `target` into a video overlay on the same source, and choose a `sourceStart` and duration that include the sampled time. The example below places two seconds of screen footage at a word in a separate narration track. Coordinates are fractions of the displayed source image measured from the top left.
+
+```json
+{"type":"upsert_overlay","overlay":{
+  "id":"back-tap","type":"video","assetId":"screen","sourceStart":4.5,"start":0,"end":2,
+  "anchor":{"assetId":"voice","wordId":"w42"},
+  "screenFocus":{"target":{"assetId":"screen","sourceTime":5,"bounds":{"x":0.12,"y":0.62,"width":0.26,"height":0.04}},
+    "zoom":2,"rampSeconds":0.3,"color":"#ffce42"}
+}}
+```
+
+The insert starts at the original framing, moves to the label, holds an underline and returns to its original framing on the last frame. The zoom is capped to fit the label. It supports centered `contain` and `cover`, including letterboxed source pictures. The screen insert is muted by default so narration continues. Use `audio.muted: false` to include its own sound. Use `anchor` to follow spoken words on the same or another recording, or omit it for a fixed output time. A target describes one sampled position. Choose an excerpt where the label remains there and inspect scrolling footage before placing the highlight.
 
 ## Edit caption cues
 
