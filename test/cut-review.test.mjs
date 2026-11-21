@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {access, mkdtemp, readFile, writeFile, rm, mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createProject} from '../src/project.mjs';
+import {createProject, prepareOperations} from '../src/project.mjs';
 import {analyzeCutBoundaries, analyzeAudioSamples, reviewCuts} from '../src/cut-review.mjs';
 
 async function fixture(t, options = {}) {
@@ -43,6 +43,21 @@ test('a source-contiguous split is skipped but rate or volume changes remain rev
   const report = analyzeCutBoundaries(project);
   assert.equal(report.totalCuts, 2);
   assert.deepEqual(report.cuts.map((cut) => cut.outputFrame), [40, 60]);
+});
+
+test('review catches a restarted animation and skips continuous subframe splits and finished motion', async t => {
+  const motion = {x: [{time: 0, value: 0}, {time: 1, value: 320}]};
+  const {project} = await fixture(t, {clips: [{id: 'left', assetId: 'a', sourceStart: 0, sourceEnd: 4,
+    playbackRate: 2, motion}]});
+  const split = prepareOperations(project, [{type: 'split_clip', clipId: 'left', sourceTime: 1.85, newClipId: 'right'}]);
+  assert.equal(analyzeCutBoundaries(split).totalCuts, 0);
+  const restarted = prepareOperations(split, [{type: 'set_clip_visual', clipId: 'right', patch: {motion}}]);
+  assert.deepEqual(analyzeCutBoundaries(restarted).cuts.map(c => c.outputFrame), [19]);
+
+  // Two independent offsets after the last keyframe produce the same settled position.
+  const settled = prepareOperations(project, [{type: 'set_clips', clips: restarted.clips.map((clip, i) =>
+    ({...clip, motionTimeOffset: i ? 2 : 3}))}]);
+  assert.equal(analyzeCutBoundaries(settled).totalCuts, 0);
 });
 
 test('missing and point-only word timing is explicitly unassessed', async (t) => {

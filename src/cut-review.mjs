@@ -8,6 +8,7 @@ import {renderProject} from './render.mjs';
 import {toolEnv} from './media.mjs';
 import {resolveAudioSettings, resolveClipAudio, volumeAt} from './audio-settings.mjs';
 import {colorTransform} from './color-settings.mjs';
+import {clipSeconds, valueAt} from './edit-controls.mjs';
 
 const invalid = (message) => { throw Object.assign(new Error(message), {code: 'INVALID_REVIEW_REQUEST'}); };
 const abortError = () => Object.assign(new Error('Cut review cancelled'), {name: 'AbortError', code: 'CANCELLED'});
@@ -26,6 +27,23 @@ function wordBoundary(project, clip, sourceTime, side) {
   return {status, toleranceSeconds: 0.015, intervalCount: intervals.length, pointCount, evidence};
 }
 
+// The caller has established that both clips have the same keyframes.
+function motionContinues(left, right, fps) {
+  if (!left.motion) return true;
+  const leftOffset = left.motionTimeOffset ?? 0;
+  const rightOffset = right.motionTimeOffset ?? 0;
+  // A normal split advances the curve in source-derived output seconds, which
+  // can fall between the rounded frames of the compiled timeline.
+  if (Math.abs(leftOffset + clipSeconds(left) - rightOffset) < 1e-7) return true;
+
+  const continuingTime = leftOffset + (right.from - left.from) / fps;
+  const matchesAt = frame => Object.values(left.motion).every(points =>
+    Math.abs(valueAt(points, continuingTime + frame / fps) - valueAt(points, rightOffset + frame / fps)) < 1e-7);
+  // Check the adjoining pose and motion leaving it. Constant or completed
+  // animations can have different clocks while displaying the same picture.
+  return matchesAt(0) && (right.durationInFrames < 2 || matchesAt(1));
+}
+
 /** Locate actual discontinuities on the compiled master frame clock. */
 export function analyzeCutBoundaries(project) {
   if (project.custom && project.custom.mode !== 'layer') throw Object.assign(new Error('This standalone composition may use independent cuts. Adapt its motion to custom.mode="layer" to keep the engine in control of the main timeline.'), {code: 'UNSUPPORTED_CUSTOM_REVIEW'});
@@ -42,7 +60,7 @@ export function analyzeCutBoundaries(project) {
       JSON.stringify(colorTransform(left.color)) === JSON.stringify(colorTransform(right.color)) &&
       JSON.stringify(leftAudio) === JSON.stringify(rightAudio) &&
       JSON.stringify([left.crop, left.focus, left.motion]) === JSON.stringify([right.crop, right.focus, right.motion]) &&
-      JSON.stringify(left.position ?? null) === JSON.stringify(right.position ?? null);
+      JSON.stringify(left.position ?? null) === JSON.stringify(right.position ?? null) && motionContinues(left, right, timeline.fps);
     if (contiguous) continue;
     const leftWords = wordBoundary(project, {...left, assetId: left.audioAssetId}, left.audio?.sourceEnd ?? left.sourceEnd, 'left');
     const rightWords = wordBoundary(project, {...right, assetId: right.audioAssetId}, right.audio?.sourceStart ?? right.sourceStart, 'right');
