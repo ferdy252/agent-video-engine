@@ -70,6 +70,10 @@ test('import refuses existing destinations and invalid legacy timings without pa
   await assert.rejects(importLegacyProject(projectDir, {path: sourceProject}), {code: 'PROJECT_EXISTS'});
   assert.equal(await readFile(path.join(projectDir, 'project.json'), 'utf8'), before);
   const invalidDir = `${projectDir}-invalid`;
+  await writeFile(sourceProject, JSON.stringify({version: 1, videoPath: './original.wav',
+    words: [{word: 'intro', start: null, end: 2}], deletedRanges: []}));
+  await assert.rejects(importLegacyProject(invalidDir, {path: sourceProject}), /word timing/);
+  await assert.rejects(access(path.join(invalidDir, 'project.json')), {code: 'ENOENT'});
   await writeFile(sourceProject, JSON.stringify({version: 1, videoPath: './original.wav', words: [], deletedRanges: [{start: '1', end: 2}]}));
   await assert.rejects(importLegacyProject(invalidDir, {path: sourceProject}), {code: 'INVALID_LEGACY_PROJECT'});
   await assert.rejects(access(path.join(invalidDir, 'project.json')), {code: 'ENOENT'});

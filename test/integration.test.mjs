@@ -14,6 +14,7 @@ import {run, fileFingerprint, toolEnv} from '../src/media.mjs';
 import {normalizeTranscript, transcribeAsset} from '../src/transcribe.mjs';
 import {getJob, jobDir, saveJob} from '../src/jobs.mjs';
 import {bundle} from '../src/bundle.mjs';
+import {callTool} from '../src/api.mjs';
 
 const exec = promisify(execFile);
 const root = resolve(import.meta.dirname, '..');
@@ -41,6 +42,33 @@ test('native point-timed words survive normalization and fingerprints use file c
     assert.throws(() => normalizeTranscript([{text: 'bad', start: 0.8, end: 1.3}], 'camera', {duration: 1}), /beyond/);
     assert.throws(() => normalizeTranscript([{text: 'bad', start: 2, end: 1}], 'camera'), /timing/);
   } finally { await rm(dir, {recursive: true, force: true}); }
+});
+
+test('transcript imports reject missing timings atomically and preserve measured zero and numeric strings', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'engine-import-timings-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const projectDir = join(dir, 'project'), source = join(dir, 'source.wav'), path = join(dir, 'words.json');
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=duration=4', source]);
+  await callTool('project_create', {projectDir, name: 'Source timing'});
+  const {asset} = await callTool('media_add', {projectDir, expectedRevision: 0, path: source, addToTimeline: true});
+  const request = {projectDir, expectedRevision: 1, assetId: asset.id, path};
+  const before = await readFile(join(projectDir, 'project.json'), 'utf8');
+  for (const value of [null, '', '  ', false, true, [], {}, undefined]) {
+    for (const timing of [{start: value, end: 2}, {start: 0, end: value}, {offsets: {from: value, to: 2000}},
+      {offsets: {from: 0, to: value}}, {offsets: {from: value, to: 2000}, tokens: [{text: 'intro', offsets: {from: 0, to: 1000}}]}]) {
+      await writeFile(path, JSON.stringify([{text: 'intro', ...timing}]));
+      await assert.rejects(callTool('transcript_import', request), /timing/);
+    }
+  }
+  assert.equal(await readFile(join(projectDir, 'project.json'), 'utf8'), before);
+  await writeFile(path, JSON.stringify([{text: 'intro', start: 0, end: '0.5'},
+    {text: 'next', offsets: {from: '1000', to: 2000}, tokens: [{text: 'next', offsets: {from: '1100', to: '1400'}}]},
+    {text: 'uncertain', offsets: {from: 2000, to: 2400}, tokens: [{text: 'uncertain', offsets: {from: null, to: 2300}}]}]));
+  const imported = await callTool('transcript_import', request);
+  assert.deepEqual(imported.timingReviewWordIds, ['w2']);
+  const edit = await callTool('edit_apply', {projectDir, expectedRevision: imported.revision, operations: [
+    {type: 'delete_words', assetId: asset.id, wordIds: ['w0', 'w1']}]});
+  assert.deepEqual(edit.clips.map(c => [c.sourceStart, c.sourceEnd]), [[.5, 1.1], [1.4, 4]]);
 });
 
 test('existing Whisper caches recover measured word boundaries without decoding or rewriting the evidence', async t => {
@@ -72,6 +100,11 @@ test('existing Whisper caches recover measured word boundaries without decoding 
   assert.deepEqual(await transcribeAsset(dir, asset, {modelPath}), upgraded);
   assert.equal(await readFile(join(cache, 'transcript.json'), 'utf8'), legacy);
   assert.equal(await readFile(join(cache, 'raw-whisper.json'), 'utf8'), raw);
+  // A previous cache may contain a plausible-looking zero coerced from null.
+  await rm(upgraded.transcriptPath);
+  await writeFile(join(cache, 'transcript-v2.json'), JSON.stringify({words: [{text: 'bad', start: 0, end: 2}]}));
+  await writeFile(join(cache, 'raw-whisper.json'), JSON.stringify({transcription: [token('bad', null, 2000)]}));
+  await assert.rejects(transcribeAsset(dir, asset, {modelPath}), /timing/);
 });
 
 test('durable job reads preserve completed results and detect a stopped worker', async () => {

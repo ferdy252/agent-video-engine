@@ -424,7 +424,7 @@ The legacy project import tool is now `project_import_legacy`, and its JavaScrip
 
 ## Transcript and legacy project imports
 
-`transcript_import` accepts word arrays, legacy transcript JSON or native whisper.cpp JSON. Plain word entries use `id` (optional), `text` or `word`, `start`, `end` and optional `confidence`. Times must be finite, nonnegative and ordered in source time.
+`transcript_import` accepts word arrays, legacy transcript JSON or native whisper.cpp JSON. Plain word entries use `id` (optional), `text` or `word`, `start`, `end` and optional `confidence`. Times must be finite, nonnegative and ordered in source time. Both boundaries are required, including an explicit zero for speech starting at the beginning of the recording. Numeric strings are accepted. A missing, null or blank boundary rejects the import before it changes the project.
 
 `project_import_legacy` creates a new engine project from a version-1 `.aive`. It resolves a relative `videoPath` against the original project directory, preserves the full source transcript and keeps everything outside the union of explicit `deletedRanges`. Untranscribed lead-in, gaps and trailing footage survive unless explicitly cut. The original `.aive` and media remain unchanged.
 

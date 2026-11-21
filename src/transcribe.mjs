@@ -10,18 +10,25 @@ export function uncertainWordTiming(word) {
   return word.start === word.end || (!/\s/u.test(word.text.trim()) && word.end - word.start > 3);
 }
 
-function spokenOffsets(item, text) {
+function timingValue(value) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string' && value.trim()) return Number(value);
+  return NaN;
+}
+
+function spokenOffsets(item, text, segmentStart, segmentEnd) {
   const visible = item.tokens.filter(token => typeof token?.text === 'string' && !/^\[_[^\]]+\]$/u.test(token.text));
   if (visible.map(token => token.text).join('').trim() !== text) return null;
   const spoken = visible.filter(token => /[^\p{P}\s]/u.test(token.text));
   if (!spoken.length) return null;
-  let previousEnd = item.offsets.from;
+  let firstStart, previousEnd = segmentStart;
   for (const token of spoken) {
-    const {from, to} = token.offsets ?? {};
-    if (!Number.isFinite(from) || !Number.isFinite(to) || from < previousEnd || to <= from || to > item.offsets.to) return null;
+    const from = timingValue(token.offsets?.from), to = timingValue(token.offsets?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from < previousEnd || to <= from || to > segmentEnd) return null;
+    firstStart ??= from;
     previousEnd = to;
   }
-  return {from: spoken[0].offsets.from, to: previousEnd};
+  return {from: firstStart, to: previousEnd};
 }
 
 export function normalizeTranscript(document, assetId, {duration, tolerance = 0.15} = {}) {
@@ -33,14 +40,18 @@ export function normalizeTranscript(document, assetId, {duration, tolerance = 0.
   for (const item of input) {
     const text = String(item.text ?? item.word ?? '').trim();
     if (!text || /^\[(BLANK_AUDIO|SILENCE)\]$/.test(text)) continue;
-    const hasTokens = item.offsets && Array.isArray(item.tokens);
-    const measured = hasTokens ? spokenOffsets(item, text) : null;
-    const offsets = measured ?? item.offsets;
-    let start = offsets ? Number(offsets.from) / 1000 : Number(item.start);
-    let end = offsets ? Number(offsets.to) / 1000 : Number(item.end);
-    if (![start, end].every(Number.isFinite) || start < 0 || end < start || (words.length && start < words.at(-1).start)) {
+    const hasOffsets = item.offsets != null;
+    const from = timingValue(hasOffsets ? item.offsets.from : item.start);
+    const to = timingValue(hasOffsets ? item.offsets.to : item.end);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to < from) {
       throw new Error('Invalid word timing. Native timings must be finite, ordered and nonnegative.');
     }
+    const hasTokens = hasOffsets && Array.isArray(item.tokens);
+    const measured = hasTokens ? spokenOffsets(item, text, from, to) : null;
+    const unit = hasOffsets ? 1000 : 1;
+    let start = (measured?.from ?? from) / unit;
+    let end = (measured?.to ?? to) / unit;
+    if (words.length && start < words.at(-1).start) throw new Error('Invalid word timing. Words must be in source order.');
     const id = String(item.id ?? `w${words.length}`);
     if (duration !== undefined && end > duration) {
       if (end > duration + tolerance) throw new Error('Transcript extends beyond source media; inspect raw-whisper.json');
@@ -61,19 +72,23 @@ export async function transcribeAsset(projectDir, asset, {modelPath, language = 
   const modelInfo = await stat(model); // A missing model is an actionable error, never a download.
   const key = createHash('sha256').update(JSON.stringify([await fileFingerprint(asset.path), model, modelInfo.size, modelInfo.mtimeMs, language, 1])).digest('hex');
   const dir = join(resolve(projectDir), '.engine/transcripts', key);
-  const transcriptPath = join(dir, 'transcript-v2.json');
+  const transcriptPath = join(dir, 'transcript-v3.json');
   try { const cached = JSON.parse(await readFile(transcriptPath, 'utf8')); return {transcript: {...cached, assetId: asset.id}, transcriptPath, cached: true}; }
   catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
   await mkdir(dir, {recursive: true});
   const rawPath = join(dir, 'raw-whisper.json');
   let work;
   let native;
-  try {
-    // A completed v1 cache establishes that the decoder finished writing raw evidence.
-    if (Array.isArray(JSON.parse(await readFile(join(dir, 'transcript.json'), 'utf8')).words)) {
-      native = JSON.parse(await readFile(rawPath, 'utf8'));
-    }
-  } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+  // Older normalized caches cannot distinguish missing timing from a real zero.
+  // A completed cache establishes that the decoder finished writing raw evidence.
+  for (const previous of ['transcript-v2.json', 'transcript.json']) {
+    try {
+      if (Array.isArray(JSON.parse(await readFile(join(dir, previous), 'utf8'))?.words)) {
+        native = JSON.parse(await readFile(rawPath, 'utf8'));
+        break;
+      }
+    } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+  }
   const cached = Boolean(native);
   try {
     if (!native) {
