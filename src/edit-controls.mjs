@@ -22,6 +22,9 @@ export function validateMotion(motion) {
     }
   }
 }
+export function hasSourceCrop(item) {
+  return Object.values(item.crop ?? {}).some(fraction => fraction > 0);
+}
 export function validateVisual(item) {
   if (item.motion !== undefined) validateMotion(item.motion);
   if (item.motionTimeOffset !== undefined) finite(item.motionTimeOffset, 'motionTimeOffset');

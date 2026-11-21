@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
+import {mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createProject, prepareOperations} from '../src/project.mjs';
@@ -118,4 +118,40 @@ test('rendered sound can lead and outlast picture while volume envelopes and fad
   assert.ok(tone(samples, 880, .5, .05) < tone(samples, 880, .8) * .3, 'fade removes abrupt leading sound');
   for (const frame of [8, 23]) assert.ok(Math.max(...pixel(await pixels(output, frame), 80, 45)) < 3, 'gap/tail has background picture');
   assert.ok(!(await readdir(dir)).some(file => file.startsWith('.agent-video-render-')));
+});
+
+test('source crop removes asymmetric edges before fitting main pictures and overlays', real, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'engine-source-crop-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const pattern = 'color=red:s=100x100:r=10:d=1,drawbox=x=20:y=0:w=40:h=100:color=blue:t=fill,drawbox=x=20:y=50:w=40:h=50:color=lime:t=fill';
+  const svg = join(dir, 'chart.svg'), mp4 = join(dir, 'chart.mp4');
+  await writeFile(svg, '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">' +
+    '<rect width="100" height="100" fill="red"/><rect x="20" width="40" height="100" fill="blue"/>' +
+    '<rect x="20" y="50" width="40" height="50" fill="lime"/></svg>');
+  await run('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', pattern, '-c:v', 'libx264', mp4]);
+  const crop = {left: .2, right: .4};
+  const project = await createProject(join(dir, 'project'), {
+    settings: {width: 240, height: 200, fps: 10}, captions: {enabled: false},
+    assets: [{id: 'still', path: svg, type: 'image', duration: 1}, await probeAsset(mp4, 'video')],
+    clips: [{id: 'photo', assetId: 'still', sourceStart: 0, sourceEnd: 1,
+      crop, fit: 'contain', focus: {x: .25, y: .5}, position: {x: 0, y: 0, width: 240, height: 100}}],
+    overlays: [
+      {id: 'inset', type: 'video', assetId: 'video', start: 0, end: 1, crop, focus: {x: 0, y: 1},
+        style: {top: '50%', width: '50%', height: '50%', objectFit: 'contain', objectPosition: 'right 20px top 6px'}},
+      {id: 'detail', type: 'video', assetId: 'video', start: 0, end: 1, crop, focus: {x: .5, y: 0},
+        style: {left: '50%', top: '50%', width: '50%', height: '50%', objectFit: 'cover', objectPosition: 'center 100%'}},
+    ],
+  });
+  const outputPath = join(dir, 'crop.mp4');
+  await renderProject(project, {kind: 'preview', scale: 1, fromFrame: 1, toFrame: 2, outputPath});
+  const data = await pixels(outputPath, 0);
+  const leakedEdge = data.some((red, i) => i % 3 === 0 && red > 180 && data[i + 1] < 60 && data[i + 2] < 60);
+  assert.equal(leakedEdge, false, 'Trimmed red pixels must be absent across the whole encoded frame');
+  const at = (x, y) => [...data.subarray((y * 240 + x) * 3, (y * 240 + x) * 3 + 3)];
+  for (const [x, y] of [[45, 25], [95, 25], [55, 125], [105, 125], [80, 102]]) {
+    assert.ok(Math.max(...at(x, y)) < 12, `The removed edge must be empty at ${x},${y}: ${at(x, y)}`);
+  }
+  assert.ok(at(52, 25)[2] > 190 && at(87, 75)[1] > 190, 'main clip fits all retained pixels at the chosen focus');
+  assert.ok(at(62, 125)[2] > 190 && at(97, 175)[1] > 190, 'a contained overlay honors CSS edge offsets ahead of normalized focus');
+  assert.ok(at(130, 105)[1] > 190 && at(225, 188)[1] > 190, 'CSS bottom alignment uses the negative free space of a cover overlay');
 });

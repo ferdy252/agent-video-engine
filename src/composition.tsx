@@ -2,14 +2,15 @@ import React, {createContext, useContext, useId} from 'react';
 import {TransitionSeries, linearTiming} from '@remotion/transitions';
 import {slide} from '@remotion/transitions/slide';
 import {colorTransform} from './color-settings.mjs';
-import {motionStyle, transitionStyle, GRAPHIC_PRESETS} from './edit-controls.mjs';
+import {hasSourceCrop, motionStyle, transitionStyle, GRAPHIC_PRESETS} from './edit-controls.mjs';
 import {volumeAt} from './audio-settings.mjs';
 import {
   AbsoluteFill, Audio, Composition, Img, OffthreadVideo, Sequence,
   useCurrentFrame,
 } from 'remotion';
 
-type Asset = {id: string; src: string; type: string; hasAudio?: boolean};
+type Asset = {id: string; src: string; type: string; hasAudio?: boolean; cropDisplaySize?: {width: number; height: number} | null};
+type Framing = {crop?: {left?: number; right?: number; top?: number; bottom?: number}; focus?: {x: number; y: number}};
 type Timeline = {
   fps: number; width: number; height: number; durationInFrames: number;
   assets: Asset[]; clips: any[]; overlays: any[]; captions: any[];
@@ -72,22 +73,68 @@ function MediaColorDefinition({color}: {color: ReturnType<typeof useMediaColor>}
   </svg>;
 }
 
+// The browser resolves position keywords, edge offsets, CSS variables and calc()
+// into two axes. Their percentages refer to the space left after fitting,
+// which may be negative when a cover crop is larger than its viewport.
+function placeCroppedOverlay(element: HTMLDivElement, width: string, height: string) {
+  const position = element.computedStyleMap().get('object-position') as CSSPositionValue;
+  const axis = (value: CSSNumericValue, freeSpace: string) => value.toString().replace(
+    /(-?(?:\d*\.)?\d+(?:e[+-]?\d+)?)%/gi,
+    (_, percent) => `calc(${Number(percent) / 100} * (${freeSpace}))`,
+  );
+  element.style.left = axis(position.x, `100cqw - ${width}`);
+  element.style.top = axis(position.y, `100cqh - ${height}`);
+}
+
+function SourcePicture({asset, framing, fit, objectPosition, filter, trimBefore, playbackRate = 1}: {
+  asset: Asset; framing: Framing; fit: React.CSSProperties['objectFit']; filter?: string;
+  trimBefore: number; playbackRate?: number; objectPosition?: React.CSSProperties['objectPosition'];
+}) {
+  const image = (style: React.CSSProperties) => asset.type === 'image'
+    ? <Img src={asset.src} crossOrigin="anonymous" style={style}/>
+    : <OffthreadVideo src={asset.src} trimBefore={trimBefore} playbackRate={playbackRate} muted style={style}/>;
+  const x = (framing.focus?.x ?? .5) * 100, y = (framing.focus?.y ?? .5) * 100;
+  if (!hasSourceCrop(framing)) {
+    return image({position: 'absolute', inset: 0, ...mediaStyle, objectFit: fit, objectPosition: objectPosition ?? `${x}% ${y}%`, filter});
+  }
+  const {left = 0, right = 0, top = 0, bottom = 0} = framing.crop!;
+  const w = 1 - left - right, h = 1 - top - bottom;
+  const size = asset.cropDisplaySize!;
+  const cropWidth = size.width * w, cropHeight = size.height * h, aspect = cropWidth / cropHeight;
+  // Fit the retained source rectangle in the actual layout box. Clipping only
+  // the outer box lets discarded pixels show in the unused space under contain.
+  const heightLimitedWidth = `${100 * aspect}cqh`;
+  let width = '100cqw', height = 'auto';
+  switch (fit) {
+    case 'cover': width = `max(100cqw, ${heightLimitedWidth})`; break;
+    case 'contain': width = `min(100cqw, ${heightLimitedWidth})`; break;
+    case 'scale-down': width = `min(${cropWidth}px, 100cqw, ${heightLimitedWidth})`; break;
+    case 'none': width = `${cropWidth}px`; break;
+    default: height = '100cqh';
+  }
+  return <div style={{position: 'absolute', inset: 0, containerType: 'size', overflow: 'hidden'}}>
+    <div ref={objectPosition == null ? undefined : element => {
+      if (element) placeCroppedOverlay(element, width, height === 'auto' ? `calc(${width} / ${aspect})` : height);
+    }} style={{position: 'absolute', width, height, aspectRatio: aspect, overflow: 'hidden',
+      ...(objectPosition == null ? {left: `${x}%`, top: `${y}%`, transform: `translate(-${x}%, -${y}%)`} : {objectPosition})}}>
+      {image({position: 'absolute', left: `${-100 * left / w}%`, top: `${-100 * top / h}%`,
+        width: `${100 / w}%`, height: `${100 / h}%`, objectFit: 'fill', objectPosition: 'center', filter})}
+    </div>
+  </div>;
+}
+
 function Clip({clip, timeline}: {clip: any; timeline: Timeline}) {
   const frame = useCurrentFrame();
   const asset = getAsset(timeline, clip.assetId);
   const color = useMediaColor(clip.color);
   const moving = motionStyle(clip.motion, frame, timeline.fps, clip.motionTimeOffset), transition = transitionStyle(clip, frame);
-  const crop = clip.crop ?? {}, w = 1 - (crop.left ?? 0) - (crop.right ?? 0), h = 1 - (crop.top ?? 0) - (crop.bottom ?? 0);
-  const style: React.CSSProperties = {position: 'absolute', left: `${-(crop.left ?? 0) / w * 100}%`, top: `${-(crop.top ?? 0) / h * 100}%`,
-    width: `${100 / w}%`, height: `${100 / h}%`, objectFit: clip.fit ?? 'contain',
-    objectPosition: `${(clip.focus?.x ?? .5) * 100}% ${(clip.focus?.y ?? .5) * 100}%`, filter: color.filter};
   if (asset.type === 'audio') return null;
   return <div style={{position: 'absolute', inset: 0, overflow: 'hidden',
     ...(clip.position ? {left: clip.position.x, top: clip.position.y, width: clip.position.width, height: clip.position.height, right: 'auto', bottom: 'auto'} : {}),
     ...moving, ...transition, opacity: moving.opacity * transition.opacity}}>
     <MediaColorDefinition color={color}/>
-    {asset.type === 'image' ? <Img src={asset.src} crossOrigin="anonymous" style={style}/> : <OffthreadVideo src={asset.src} trimBefore={clip.sourceFrame}
-      playbackRate={clip.playbackRate ?? 1} muted style={style}/>}
+    <SourcePicture asset={asset} framing={clip} fit={clip.fit ?? 'contain'} filter={color.filter}
+      trimBefore={clip.sourceFrame} playbackRate={clip.playbackRate}/>
   </div>;
 }
 
@@ -126,12 +173,9 @@ function Overlay({overlay, timeline}: {overlay: any; timeline: Timeline}) {
   const sound = hasSound ? <Audio src={asset.src} trimBefore={trimBefore}
     volume={f => volumeAt(audio, f / timeline.fps, overlay.durationInFrames / timeline.fps, overlay.volume ?? 1)}/> : null;
   if (overlay.type === 'audio') return sound;
-  const crop = overlay.crop ?? {}, w = 1 - (crop.left ?? 0) - (crop.right ?? 0), h = 1 - (crop.top ?? 0) - (crop.bottom ?? 0);
-  const pictureStyle: React.CSSProperties = {position: 'absolute', left: `${-(crop.left ?? 0) / w * 100}%`, top: `${-(crop.top ?? 0) / h * 100}%`,
-    width: `${100 / w}%`, height: `${100 / h}%`, objectFit: baseStyle.objectFit ?? 'contain',
-    objectPosition: baseStyle.objectPosition ?? `${(overlay.focus?.x ?? .5) * 100}% ${(overlay.focus?.y ?? .5) * 100}%`, filter: color.filter};
   return <><div style={{...style, overflow: 'hidden'}}><MediaColorDefinition color={color}/>
-    {overlay.type === 'image' ? <Img src={asset.src} style={pictureStyle}/> : <OffthreadVideo src={asset.src} trimBefore={trimBefore} muted style={pictureStyle}/>}
+    <SourcePicture asset={asset} framing={overlay} fit={baseStyle.objectFit ?? 'contain'} objectPosition={baseStyle.objectPosition}
+      filter={color.filter} trimBefore={trimBefore}/>
   </div>{sound}</>;
 }
 
@@ -208,11 +252,25 @@ export function TimelineComposition({timeline, customLayerProps}: EngineProps) {
 const empty: Timeline = {fps: 30, width: 1080, height: 1920, durationInFrames: 1,
   assets: [], clips: [], overlays: [], captions: []};
 
+// Some registered images, including SVGs, have dimensions only the browser can read.
+async function engineMetadata({props}: {props: EngineProps}) {
+  const {timeline} = props;
+  const metadata = {fps: timeline.fps, width: timeline.width, height: timeline.height, durationInFrames: timeline.durationInFrames};
+  if (!timeline.assets.some(asset => asset.cropDisplaySize === null)) return metadata;
+  const assets = await Promise.all(timeline.assets.map(async asset => {
+    if (asset.cropDisplaySize !== null) return asset;
+    const image = new Image();
+    image.src = asset.src;
+    await image.decode();
+    return {...asset, cropDisplaySize: {width: image.naturalWidth, height: image.naturalHeight}};
+  }));
+  return {...metadata, props: {...props, timeline: {...timeline, assets}}};
+}
+
 export function EngineRoot() {
   return <Composition id="AgentVideo" component={TimelineComposition} width={1080} height={1920}
     fps={30} durationInFrames={1} defaultProps={{timeline: empty, customLayerProps: {}}}
-    calculateMetadata={({props}) => ({fps: props.timeline.fps, width: props.timeline.width,
-      height: props.timeline.height, durationInFrames: props.timeline.durationInFrames})}/>;
+    calculateMetadata={engineMetadata}/>;
 }
 
 // Called exactly once by the generated bundle entry, before React renders.

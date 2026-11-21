@@ -10,7 +10,8 @@ import {bundle} from './bundle.mjs';
 import {makeCancelSignal, openBrowser, renderMedia, renderStill, selectComposition, RenderInternals} from '@remotion/renderer';
 import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
-import {assertAssets, run, toolEnv} from './media.mjs';
+import {assertAssets, assetDisplayGeometry, run, toolEnv} from './media.mjs';
+import {hasSourceCrop} from './edit-controls.mjs';
 import {buildExportQuality} from './export-quality.mjs';
 import {resolveAudioSettings} from './audio-settings.mjs';
 import {analyzeAudio, finishAudioMaster, prepareVoiceGains} from './audio-processing.mjs';
@@ -317,8 +318,8 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
   report(onProgress, {stage: 'audio_master', progress: 0});
   let mix;
   const renderStem = async (outputLocation, role) => {
-    const inputProps = role ? {...common.inputProps, timeline: {...common.inputProps.timeline, audioRenderRole: role}} : common.inputProps;
-    await renderMedia({...common, inputProps, composition: {...common.composition, props: {...common.composition.props, ...inputProps}},
+    const props = role ? {...composition.props, timeline: {...composition.props.timeline, audioRenderRole: role}} : composition.props;
+    await renderMedia({...common, inputProps: props, composition: {...composition, props},
       outputLocation, codec: 'wav', audioCodec: 'pcm-16',
       sampleRate: audioSampleRate, binariesDirectory, enforceAudioTrack: true, concurrency,
       frameRange: [0, composition.durationInFrames - 1],
@@ -408,6 +409,22 @@ async function renderFinishedAudio({common, work, composition, concurrency, fram
     'AUDIO_PEAK_LIMIT_FAILED');
 }
 
+async function assetsForRender(timeline, signal) {
+  const cropped = new Set([...timeline.clips, ...timeline.overlays].filter(hasSourceCrop).map(item => item.assetId));
+  if (!cropped.size) return timeline.assets;
+  const assets = [];
+  for (const asset of timeline.assets) {
+    if (!cropped.has(asset.id) || asset.type === 'audio') {
+      assets.push(asset);
+      continue;
+    }
+    const size = await assetDisplayGeometry(asset, signal);
+    if (!size && asset.type !== 'image') throw new Error(`Cannot determine the source dimensions for crop on ${asset.id}`);
+    assets.push({...asset, cropDisplaySize: size});
+  }
+  return assets;
+}
+
 /** One-shot headless render. Persistence, revisions and job state belong to the caller. */
 export async function renderProject(project, options = {}) {
   const {kind = 'video', signal, onProgress} = options;
@@ -458,7 +475,8 @@ export async function renderProject(project, options = {}) {
   if ((!timeline.custom || timeline.custom.mode === 'layer') && timeline.durationInFrames < 1) {
     throw new Error('Add at least one clip or overlay before rendering');
   }
-  const server = await startAssetServer(timeline.assets, {publicDir: timeline.custom?.publicDir});
+  const assets = await assetsForRender(timeline, signal);
+  const server = await startAssetServer(assets, {publicDir: timeline.custom?.publicDir});
   let work, browser;
   const {cancelSignal, cancel} = makeCancelSignal();
   const abort = () => {cancel(); if (browser) void browser.close({silent: true}).catch(() => {});};
