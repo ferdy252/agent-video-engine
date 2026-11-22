@@ -140,7 +140,7 @@ export async function doctor() {
     try { const result = await run(tool, [tool === 'whisper-cli' ? '--help' : '-version']); checks[tool] = {ok: true, version: (result.stdout || result.stderr).split('\n')[0]}; }
     catch (error) { checks[tool] = {ok: false, error: error.message}; }
   }
-  const model = process.env.VIDEO_ENGINE_MODEL || resolve(homedir(), '.cache/whisper.cpp/ggml-medium.en.bin');
+  const model = process.env.VIDEO_ENGINE_MODEL || resolve(homedir(), '.cache/whisper.cpp/ggml-small.en.bin');
   try { await access(model, constants.R_OK); checks.model = {ok: true, path: model}; }
   catch { checks.model = {ok: false, path: model, error: 'No cached model. Supply VIDEO_ENGINE_MODEL. Models are never downloaded automatically.'}; }
   checks.node = {ok: Number(process.versions.node.split('.')[0]) >= 22, version: process.versions.node};

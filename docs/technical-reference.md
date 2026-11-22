@@ -20,7 +20,7 @@ npm ci
 node src/cli.mjs doctor
 ```
 
-The engine does not download a browser or transcription model at runtime. It discovers common local Chromium installations, or uses `AGENT_VIDEO_BROWSER` when set to an executable path. Transcription defaults to `~/.cache/whisper.cpp/ggml-medium.en.bin`; set `VIDEO_ENGINE_MODEL` or supply a transcription request's `modelPath` to choose another installed model.
+The engine does not download a browser or transcription model at runtime. It discovers common local Chromium installations, or uses `AGENT_VIDEO_BROWSER` when set to an executable path. Transcription defaults to `~/.cache/whisper.cpp/ggml-small.en.bin`; set `VIDEO_ENGINE_MODEL` or supply a transcription request's `modelPath` to choose another installed model.
 
 `doctor` reports transcription dependencies even when only rendering is needed. A missing model does not prevent creating projects, importing transcripts or rendering.
 

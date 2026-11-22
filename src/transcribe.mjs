@@ -68,7 +68,7 @@ export function normalizeTranscript(document, assetId, {duration, tolerance = 0.
 
 export async function transcribeAsset(projectDir, asset, {modelPath, language = 'en', signal, onProgress = () => {}} = {}) {
   if (!asset.hasAudio && asset.type !== 'audio') throw new Error('Asset has no audio to transcribe');
-  const model = resolve(modelPath || process.env.VIDEO_ENGINE_MODEL || join(homedir(), '.cache/whisper.cpp/ggml-medium.en.bin'));
+  const model = resolve(modelPath || process.env.VIDEO_ENGINE_MODEL || join(homedir(), '.cache/whisper.cpp/ggml-small.en.bin'));
   const modelInfo = await stat(model); // A missing model is an actionable error, never a download.
   const key = createHash('sha256').update(JSON.stringify([await fileFingerprint(asset.path), model, modelInfo.size, modelInfo.mtimeMs, language, 1])).digest('hex');
   const dir = join(resolve(projectDir), '.engine/transcripts', key);
