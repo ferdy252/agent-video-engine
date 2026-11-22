@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, writeFile, readFile, mkdir, rm, access, stat} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, mkdir, rm, access, stat, appendFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -175,7 +175,7 @@ test('source stills and moving previews honor display rotation, pixel shape and 
   }
 });
 
-test('real MCP: import, source preview, edit, caption, export, undo and queue cancellation', {
+test('real MCP: import, preview, edit, export, undo and queued job safety', {
   skip: process.env.AGENT_VIDEO_INTEGRATION !== '1', timeout: 120000,
 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'engine-mcp-'));
@@ -257,6 +257,14 @@ test('real MCP: import, source preview, edit, caption, export, undo and queue ca
     const cancelled = await waitJob(queued);
     assert.equal(cancelled.status, 'cancelled');
     assert.equal(cancelled.result, undefined);
+    const queuedExport = await call('export_render', {projectDir, expectedRevision: 4});
+    await appendFile(source, '\n');
+    await new Promise(done => blocker.close(done));
+    blocker = undefined;
+    const rejected = await waitJob(queuedExport);
+    assert.equal(rejected.status, 'failed');
+    assert.equal(rejected.error.code, 'SOURCE_CHANGED');
+    await assert.rejects(access(queuedExport.request.outputPath), {code: 'ENOENT'});
   } finally {
     if (blocker) await new Promise(done => blocker.close(done));
     await client.close().catch(() => {});

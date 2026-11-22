@@ -16,6 +16,7 @@ const controller = new AbortController();
 // The OS releases this exclusive loopback socket on every process exit,
 // including SIGKILL. It cannot leave a stale lock file or lose a reaper race.
 const lockPort = 49152 + createHash('sha256').update(runtimeDir).digest().readUInt16BE(0) % 10000;
+const progressIntervalMs = 250;
 let workerLock, saving = Promise.resolve();
 function update(patch) {
   job = {...job, ...patch, updatedAt: new Date().toISOString()};
@@ -51,13 +52,24 @@ try {
   const creatingBundle = job.type === 'project_bundle';
   await update({status: 'running', stage: openingBundle ? 'Checking project bundle'
     : creatingBundle ? 'Packaging project files' : 'Checking original assets', startedAt: new Date().toISOString()});
-  // Bundle copies verify the fingerprints as they stream, without reading large files twice.
-  if (!openingBundle && !creatingBundle && job.type !== 'export_compare') await assertAssets(job.snapshot);
+  // The renderer checks source fingerprints itself. Source previews still need
+  // this check before probing the original for its display geometry.
+  const rendererChecksSources = job.type === 'render' && !job.request.sourcePreview;
+  // Bundle copies verify fingerprints as they stream.
+  if (!openingBundle && !creatingBundle && job.type !== 'export_compare' && !rendererChecksSources) {
+    await assertAssets(job.snapshot);
+  }
+  let lastProgressUpdate = -Infinity;
   const onProgress = (value, label) => {
-    const progress = typeof value === 'object' ? value.progress : value;
-    const stage = typeof value === 'object' ? value.stage : label;
-    update({...(Number.isFinite(progress) ? {progress: Math.min(0.99, Math.max(0, progress))} : {}),
-      ...(stage ? {stage} : {})}).catch(() => controller.abort());
+    const reportedProgress = typeof value === 'object' ? value.progress : value;
+    const progress = Number.isFinite(reportedProgress) ? Math.min(0.99, Math.max(0, reportedProgress)) : job.progress;
+    const stage = (typeof value === 'object' ? value.stage : label) || job.stage;
+    const now = performance.now();
+    // Rendering reports progress for every frame. Keep stage changes immediate
+    // and coalesce updates within a stage before cloning and writing the job.
+    if (stage === job.stage && (progress === job.progress || now - lastProgressUpdate < progressIntervalMs)) return;
+    lastProgressUpdate = now;
+    update({progress, stage}).catch(() => controller.abort());
   };
   let result;
   if (openingBundle) {

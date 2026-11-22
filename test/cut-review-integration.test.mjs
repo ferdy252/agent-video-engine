@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {access, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {writeFileSync} from 'node:fs';
+import {access, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, relative, resolve, sep} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -10,7 +11,9 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {run, toolEnv} from '../src/media.mjs';
+import {fileFingerprint, run, toolEnv} from '../src/media.mjs';
+import {createProject} from '../src/project.mjs';
+import {reviewCuts} from '../src/cut-review.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const exec = promisify(execFile);
@@ -171,4 +174,68 @@ test('real MCP cut review checks source joins, audio, bounded previews and immut
     await transport.close().catch(() => {});
     await rm(directory, {recursive: true, force: true});
   }
+});
+
+test('a cut batch shares one render setup and still checks and cancels individual previews', {
+  skip: process.env.AGENT_VIDEO_INTEGRATION !== '1', timeout: 120000,
+}, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'engine-cut-batch-'));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const source = join(directory, 'source.mp4');
+  await run('ffmpeg', ['-v', 'error', '-n', '-f', 'lavfi', '-i', 'testsrc2=s=160x96:r=16:d=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-shortest', source]);
+  const fingerprint = await fileFingerprint(source);
+  const publicDir = join(directory, 'public');
+  await mkdir(publicDir);
+  const accent = join(publicDir, 'accent.svg');
+  await writeFile(accent,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="cyan"/></svg>');
+  const entryPoint = join(directory, 'layer.tsx');
+  await writeFile(entryPoint, `import React from 'react';
+import {Img, staticFile} from 'remotion';
+export default function Layer() {
+  return <Img src={staticFile('accent.svg')} style={{position: 'absolute', top: 0, right: 0}} />;
+}
+`);
+  const projectDir = join(directory, 'project');
+  const project = await createProject(projectDir, {
+    settings: {width: 160, height: 96, fps: 16},
+    assets: [{id: 'source', path: source, type: 'video', duration: 3, fps: 16, hasAudio: true, fingerprint}],
+    clips: [0, 1, 2].map((start) => ({id: `clip-${start}`, assetId: 'source', sourceStart: start, sourceEnd: start + 0.5})),
+    custom: {mode: 'layer', entryPoint, publicDir},
+  });
+
+  const outputDir = join(directory, 'review');
+  const bundledCuts = new Set();
+  const review = await reviewCuts(project, {outputDir, contextSeconds: 0.25, onProgress({cutIndex, renderStage}) {
+    if (renderStage === 'bundle') bundledCuts.add(cutIndex);
+  }});
+  assert.deepEqual([...bundledCuts], [0]);
+  assert.equal(review.summary.previewsRendered, 2);
+  assert.equal(review.summary.audioAnalyzed, 2);
+  assert.deepEqual(review.cuts.map(({preview}) => preview.frameRange), [[4, 11], [12, 19]]);
+  for (const {preview} of review.cuts) {
+    assert.equal(preview.quality.checks.frameGlitches.decodedFrames, 8);
+    const {stdout} = await exec('ffmpeg', ['-v', 'error', '-i', preview.outputPath,
+      '-vf', 'crop=2:2:74:2', '-frames:v', '1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'],
+    {encoding: 'buffer', env: toolEnv});
+    assert.ok(stdout[0] < 40 && stdout[1] > 180 && stdout[2] > 180, 'Every preview loads custom public media');
+  }
+  assert.equal((await readdir(outputDir)).length, 5, 'Only two previews, their quality reports and the review remain');
+
+  const controller = new AbortController();
+  const cancelledDir = join(directory, 'cancelled');
+  await assert.rejects(reviewCuts(project, {outputDir: cancelledDir, contextSeconds: 0.25, signal: controller.signal,
+    onProgress({cutIndex, renderStage}) {
+      if (cutIndex === 1 && renderStage === 'render') controller.abort();
+    }}), {name: 'AbortError'});
+  await assert.rejects(access(cancelledDir), {code: 'ENOENT'});
+
+  const changedDir = join(directory, 'changed');
+  await assert.rejects(reviewCuts(project, {outputDir: changedDir, contextSeconds: 0.25, onProgress({cutIndex, message}) {
+    if (cutIndex === 1 && message) writeFileSync(accent, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  }}), {code: 'SOURCE_CHANGED'});
+  await assert.rejects(access(changedDir), {code: 'ENOENT'});
+  assert.equal(await fileFingerprint(source), fingerprint);
 });

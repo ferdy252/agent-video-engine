@@ -4,7 +4,7 @@ import {mkdir, open, link, rm} from 'node:fs/promises';
 import {dirname, join, resolve} from 'node:path';
 import {compileTimeline} from './timeline.mjs';
 import {validateProject} from './project.mjs';
-import {renderProject} from './render.mjs';
+import {withRenderSession} from './render.mjs';
 import {toolEnv} from './media.mjs';
 import {resolveAudioSettings, resolveClipAudio, volumeAt} from './audio-settings.mjs';
 import {colorTransform} from './color-settings.mjs';
@@ -222,56 +222,58 @@ export async function reviewCuts(project, {projectDir, outputDir, contextSeconds
   let succeeded = false;
   try {
     const cuts = boundaries.cuts.slice(offset, offset + limit);
-    for (let index = 0; index < cuts.length; index++) {
-      checkAbort(signal);
-      const cut = cuts[index];
-      onProgress({stage: 'review_cuts', progress: index / cuts.length, cutIndex: cut.index, message: `Reviewing cut ${cut.index + 1} of ${boundaries.totalCuts}`});
-      if (!renderPreviews) {
-        cut.audio = {status: 'skipped', reason: 'renderPreviews is false; only transcript-boundary timing was checked.', evidenceScope: 'none'};
-        continue;
-      }
-      const contextFrames = Math.max(1, Math.round(contextSeconds * timeline.fps));
-      const fromFrame = Math.max(0, cut.outputFrame - contextFrames);
-      const toFrame = Math.min(timeline.durationInFrames - 1, cut.outputFrame + contextFrames - 1);
-      const outputPath = join(directory, `cut-${cut.index + 1}-${randomUUID().slice(0, 8)}.mp4`);
-      const preview = await renderProject(snapshot, {kind: 'preview', fromFrame, toFrame, outputPath, scale: 0.5, signal,
-        onProgress: (update) => {
-          const fraction = update.stage === 'bundle' ? (update.progress ?? 0) * 0.1
-            : update.stage === 'render' ? 0.1 + (update.progress ?? 0) * 0.65 : update.stage === 'verify' ? 0.8 : 0.9;
-          onProgress({stage: 'review_cuts', progress: (index + fraction) / cuts.length, cutIndex: cut.index, renderStage: update.stage});
-        }});
-      const previewStart = preview.frameRange[0];
-      cut.preview = {...preview, fromFrame: previewStart, toFrame: preview.frameRange[1],
-        cutFrameInPreview: cut.outputFrame - previewStart, cutTimeInPreview: (cut.outputFrame - previewStart) / timeline.fps};
-      const expectedAudio = {left: audibleNear(timeline, cut, 'left'), right: audibleNear(timeline, cut, 'right')};
-      const knownAudioOnBothSides = expectedAudio.left && expectedAudio.right;
-      const customLayer = snapshot.custom?.mode === 'layer';
-      if (!knownAudioOnBothSides && !customLayer) {
-        cut.audio = {status: 'not_analyzable', evidenceScope: 'mixed_master', expectedAudio,
-          reason: 'Audio is not present or is intentionally muted at one or both sides of this join. Silence and level-change flags were not inferred.'};
-        continue;
-      }
-      const decoded = await decodeAudio(preview.outputPath, {signal});
-      const cutSample = Math.round(cut.preview.cutTimeInPreview * decoded.sampleRate);
-      if (cutSample <= 0 || cutSample >= decoded.samples.length / decoded.channels) {
-        cut.audio = {status: 'not_analyzable', evidenceScope: 'mixed_master', reason: 'Decoded preview does not contain audio on both sides of the join.'};
-        continue;
-      }
-      cut.audio = {...analyzeAudioSamples(decoded.samples, {...decoded, cutSample}), expectedAudio};
-      if (customLayer) {
-        cut.audio.customLayerAudio = 'unknown';
-        if (!knownAudioOnBothSides) {
-          cut.audio.silenceAssessment = 'unassessed_custom_layer_audio_expectation';
-          cut.audio.flags = cut.audio.flags.filter((flag) => flag.code !== 'LONG_SILENCE_NEAR_JOIN');
-          cut.audio.silenceAssessmentNote = 'The custom layer may supply audio. Measured level changes are available, but silence is not classified without known audio on both sides in the engine timeline.';
+    await withRenderSession(snapshot, {kind: 'preview', signal}, async (renderPreview) => {
+      for (let index = 0; index < cuts.length; index++) {
+        checkAbort(signal);
+        const cut = cuts[index];
+        onProgress({stage: 'review_cuts', progress: index / cuts.length, cutIndex: cut.index, message: `Reviewing cut ${cut.index + 1} of ${boundaries.totalCuts}`});
+        if (!renderPreviews) {
+          cut.audio = {status: 'skipped', reason: 'renderPreviews is false; only transcript-boundary timing was checked.', evidenceScope: 'none'};
+          continue;
         }
+        const contextFrames = Math.max(1, Math.round(contextSeconds * timeline.fps));
+        const fromFrame = Math.max(0, cut.outputFrame - contextFrames);
+        const toFrame = Math.min(timeline.durationInFrames - 1, cut.outputFrame + contextFrames - 1);
+        const outputPath = join(directory, `cut-${cut.index + 1}-${randomUUID().slice(0, 8)}.mp4`);
+        const preview = await renderPreview({fromFrame, toFrame, outputPath, scale: 0.5,
+          onProgress: (update) => {
+            const fraction = update.stage === 'bundle' ? (update.progress ?? 0) * 0.1
+              : update.stage === 'render' ? 0.1 + (update.progress ?? 0) * 0.65 : update.stage === 'verify' ? 0.8 : 0.9;
+            onProgress({stage: 'review_cuts', progress: (index + fraction) / cuts.length, cutIndex: cut.index, renderStage: update.stage});
+          }});
+        const previewStart = preview.frameRange[0];
+        cut.preview = {...preview, fromFrame: previewStart, toFrame: preview.frameRange[1],
+          cutFrameInPreview: cut.outputFrame - previewStart, cutTimeInPreview: (cut.outputFrame - previewStart) / timeline.fps};
+        const expectedAudio = {left: audibleNear(timeline, cut, 'left'), right: audibleNear(timeline, cut, 'right')};
+        const knownAudioOnBothSides = expectedAudio.left && expectedAudio.right;
+        const customLayer = snapshot.custom?.mode === 'layer';
+        if (!knownAudioOnBothSides && !customLayer) {
+          cut.audio = {status: 'not_analyzable', evidenceScope: 'mixed_master', expectedAudio,
+            reason: 'Audio is not present or is intentionally muted at one or both sides of this join. Silence and level-change flags were not inferred.'};
+          continue;
+        }
+        const decoded = await decodeAudio(preview.outputPath, {signal});
+        const cutSample = Math.round(cut.preview.cutTimeInPreview * decoded.sampleRate);
+        if (cutSample <= 0 || cutSample >= decoded.samples.length / decoded.channels) {
+          cut.audio = {status: 'not_analyzable', evidenceScope: 'mixed_master', reason: 'Decoded preview does not contain audio on both sides of the join.'};
+          continue;
+        }
+        cut.audio = {...analyzeAudioSamples(decoded.samples, {...decoded, cutSample}), expectedAudio};
+        if (customLayer) {
+          cut.audio.customLayerAudio = 'unknown';
+          if (!knownAudioOnBothSides) {
+            cut.audio.silenceAssessment = 'unassessed_custom_layer_audio_expectation';
+            cut.audio.flags = cut.audio.flags.filter((flag) => flag.code !== 'LONG_SILENCE_NEAR_JOIN');
+            cut.audio.silenceAssessmentNote = 'The custom layer may supply audio. Measured level changes are available, but silence is not classified without known audio on both sides in the engine timeline.';
+          }
+        }
+        const nearbyCuts = boundaries.cuts.filter((other) => other.id !== cut.id && Math.abs(other.outputTime - cut.outputTime) < 0.15)
+          .map((other) => ({id: other.id, outputTime: other.outputTime}));
+        if (nearbyCuts.length) cut.audio.isolationNote = 'Other joins fall inside the audio measurement window; level changes cannot be attributed to this join alone.';
+        cut.audio.nearbyCuts = nearbyCuts;
+        cut.flags.push(...cut.audio.flags);
       }
-      const nearbyCuts = boundaries.cuts.filter((other) => other.id !== cut.id && Math.abs(other.outputTime - cut.outputTime) < 0.15)
-        .map((other) => ({id: other.id, outputTime: other.outputTime}));
-      if (nearbyCuts.length) cut.audio.isolationNote = 'Other joins fall inside the audio measurement window; level changes cannot be attributed to this join alone.';
-      cut.audio.nearbyCuts = nearbyCuts;
-      cut.flags.push(...cut.audio.flags);
-    }
+    });
     checkAbort(signal);
     const byCode = {};
     for (const cut of cuts) for (const flag of cut.flags) byCode[flag.code] = (byCode[flag.code] ?? 0) + 1;

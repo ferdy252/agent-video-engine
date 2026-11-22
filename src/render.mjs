@@ -107,7 +107,7 @@ export async function startAssetServer(assets, {publicDir} = {}) {
           const path = await realpath(target);
           const route = `/${token}/public/${relative.split('/').map(encodeURIComponent).join('/')}`;
           routes.set(route, {path, size: info.size});
-          publicFiles.push({name: relative, route, path, sizeInBytes: info.size, lastModified: Math.floor(info.mtimeMs)});
+          publicFiles.push({name: relative, route, path, info});
         }
       }
     };
@@ -151,7 +151,23 @@ export async function startAssetServer(assets, {publicDir} = {}) {
     assets: metadata.map(({asset, route}) => {const {path: _privatePath, ...safe} = asset; return {...safe, src: origin + route};}),
     sourcePaths: [...new Set([...metadata, ...publicFiles].map(({path}) => path))],
     staticBase: `${origin}/${token}/public`,
-    staticFiles: publicFiles.map(({path: _path, route, ...file}) => ({...file, src: origin + route})),
+    staticFiles: publicFiles.map(({name, route, info}) => ({name, sizeInBytes: info.size,
+      lastModified: Math.floor(info.mtimeMs), src: origin + route})),
+    async assertSourceRoutes({includePublic = false} = {}) {
+      for (const {asset, path, route} of metadata) {
+        if (await realpath(asset.path) !== path || (await stat(path)).size !== routes.get(route).size) {
+          throw Object.assign(new Error(`Source path or size changed during rendering: ${asset.id}.`), {code: 'SOURCE_CHANGED'});
+        }
+      }
+      if (includePublic) for (const {name, path, info} of publicFiles) {
+        const pathNow = await realpath(join(publicDir, name)).catch(() => null);
+        const current = pathNow === path ? await stat(path).catch(() => null) : null;
+        if (!current?.isFile() || current.size !== info.size || current.mtimeMs !== info.mtimeMs ||
+          current.ino !== info.ino || current.dev !== info.dev) {
+          throw Object.assign(new Error(`Custom public media changed during rendering: ${name}.`), {code: 'SOURCE_CHANGED'});
+        }
+      }
+    },
     close: async () => {for (const socket of sockets) socket.destroy(); await new Promise((done) => server.close(done));},
   };
 }
@@ -425,28 +441,8 @@ async function assetsForRender(timeline, signal) {
   return assets;
 }
 
-/** One-shot headless render. Persistence, revisions and job state belong to the caller. */
-export async function renderProject(project, options = {}) {
-  const {kind = 'video', signal, onProgress} = options;
-  if (!['video', 'preview', 'still'].includes(kind)) throw new Error('kind must be video, preview or still');
-  if (typeof options.outputPath !== 'string') throw new Error('outputPath is required');
-  if (!isAbsolute(options.outputPath)) throw new Error('outputPath must be an absolute local path');
-  const extension = extname(options.outputPath).toLowerCase();
-  if (kind === 'still' ? !['.png', '.jpg', '.jpeg'].includes(extension) : extension !== '.mp4') {
-    throw new Error(kind === 'still' ? 'Still output must be PNG or JPEG' : 'Video output must be MP4');
-  }
-  const scale = options.scale ?? (kind === 'preview' ? .5 : 1);
-  if (!Number.isFinite(scale) || scale <= 0 || scale > 2) throw new Error('scale must be greater than zero and at most 2');
-  const concurrency = options.concurrency ?? 1;
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error('concurrency must be an integer from 1 to 8');
-  const minShortSide = options.minShortSide ?? 1080;
-  if (!Number.isInteger(minShortSide) || minShortSide < 2 || minShortSide > 8192) {
-    throw new Error('minShortSide must be an integer from 2 to 8192');
-  }
-  checkAbort(signal);
-  validateProject(project);
-  await assertAssets(project);
-  let timeline = compileTimeline(project);
+function timelineForRender(project, kind) {
+  const timeline = compileTimeline(project);
   if (timeline.custom && timeline.custom.mode !== 'layer' && (project.captions.cues != null || project.captions.wordOverrides?.length ||
     project.clips.some(clip => clip.type === 'gap' || clip.transition || clip.crop || clip.focus || clip.motion ||
       clip.audio?.sourceStart !== undefined || clip.audio?.assetId !== undefined || clip.audio?.offset) ||
@@ -475,11 +471,106 @@ export async function renderProject(project, options = {}) {
   if ((!timeline.custom || timeline.custom.mode === 'layer') && timeline.durationInFrames < 1) {
     throw new Error('Add at least one clip or overlay before rendering');
   }
-  const assets = await assetsForRender(timeline, signal);
-  const server = await startAssetServer(assets, {publicDir: timeline.custom?.publicDir});
-  let work, browser;
+  return {timeline, audioSettings};
+}
+
+async function prepareRender(project, session, {kind, output, signal, onProgress}) {
+  const {server, audioSettings} = session;
+  let {timeline} = session;
+  let audio;
+  if (kind !== 'still') {
+    const prepared = await prepareVoiceGains(project, timeline, {signal,
+      onProgress: (update) => report(onProgress, {...update, stage: 'audio_voice'})});
+    timeline = prepared.timeline;
+    audio = {enabled: false, settings: audioSettings, scope: 'manual_clip_gains', voice: prepared.report,
+      limitations: ['Automatic voice leveling and complete-master finishing are disabled. Saved manual clip gains still apply.']};
+  }
+  const custom = timeline.custom;
+  const customMode = custom?.mode ?? 'composition';
+  let customLayer;
+  let entryPoint = join(engineRoot, 'src/remotion-entry.ts');
+  if (custom) {
+    if (!isAbsolute(custom.entryPoint)) throw new Error('Custom entryPoint must be an absolute local path');
+    const customEntryPoint = await realpath(custom.entryPoint);
+    if (!(await stat(customEntryPoint)).isFile()) throw new Error('Custom entryPoint is not a regular file');
+    if (customMode === 'layer') customLayer = {entryPoint: customEntryPoint, exportName: custom.exportName ?? 'default'};
+    else {
+      entryPoint = customEntryPoint;
+      if (typeof custom.compositionId !== 'string' || !custom.compositionId) throw new Error('Custom compositionId is required');
+    }
+  }
+  const browserExecutable = await findBrowserExecutable();
+  const inputProps = customMode === 'layer'
+    ? {timeline: {...timeline, assets: server.assets}, customLayerProps: custom?.props ?? {}}
+    : {...(custom?.props ?? {}), timeline: {...timeline, assets: server.assets}};
+  const compositionId = custom && customMode !== 'layer' ? custom.compositionId : 'AgentVideo';
+  report(onProgress, {stage: 'bundle', progress: 0});
+  session.bundleDir = await mkdtemp(join(dirname(output), '.agent-video-bundle-'));
+  const serveUrl = await bundle({entryPoint, outDir: session.bundleDir, customLayer,
+    staticBase: server.staticBase, staticFiles: server.staticFiles,
+    onProgress: (progress) => report(onProgress, {stage: 'bundle', progress: progress / 100})});
+  checkAbort(signal);
+  session.browser = await openBrowser('chrome', {browserExecutable, chromeMode: 'chrome-for-testing',
+    chromiumOptions: {headless: true}, logLevel: 'error'});
+  checkAbort(signal);
+  const composition = await selectComposition({serveUrl, id: compositionId, inputProps,
+    puppeteerInstance: session.browser, browserExecutable, chromeMode: 'chrome-for-testing', logLevel: 'error'});
+  checkAbort(signal);
+  if (customMode === 'layer' && ['fps', 'width', 'height', 'durationInFrames'].some((key) => composition[key] !== timeline[key])) {
+    throw new Error('Custom layer changed the engine composition clock. Layers must use the supplied timeline.');
+  }
+  return {serveUrl, composition, inputProps, browserExecutable, compositionId, custom, customMode, audio};
+}
+
+/** Share setup across sequential renders of the same snapshot and kind. */
+export async function withRenderSession(project, {kind, signal}, runRenders) {
+  const session = {};
+  try {
+    return await runRenders((options) => renderInSession(project, {...options, kind, signal}, session));
+  } finally {
+    if (session.browser) await session.browser.close({silent: true}).catch(() => {});
+    try { await session.server?.close(); }
+    finally { if (session.bundleDir) await rm(session.bundleDir, {recursive: true, force: true}); }
+  }
+}
+
+/** One-shot headless render. Persistence, revisions and job state belong to the caller. */
+export async function renderProject(project, {kind = 'video', signal, ...options} = {}) {
+  return withRenderSession(project, {kind, signal}, (render) => render(options));
+}
+
+async function renderInSession(project, options, session) {
+  const {kind, signal, onProgress} = options;
+  if (!['video', 'preview', 'still'].includes(kind)) throw new Error('kind must be video, preview or still');
+  if (typeof options.outputPath !== 'string') throw new Error('outputPath is required');
+  if (!isAbsolute(options.outputPath)) throw new Error('outputPath must be an absolute local path');
+  const extension = extname(options.outputPath).toLowerCase();
+  if (kind === 'still' ? !['.png', '.jpg', '.jpeg'].includes(extension) : extension !== '.mp4') {
+    throw new Error(kind === 'still' ? 'Still output must be PNG or JPEG' : 'Video output must be MP4');
+  }
+  const scale = options.scale ?? (kind === 'preview' ? .5 : 1);
+  if (!Number.isFinite(scale) || scale <= 0 || scale > 2) throw new Error('scale must be greater than zero and at most 2');
+  const concurrency = options.concurrency ?? 1;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error('concurrency must be an integer from 1 to 8');
+  const minShortSide = options.minShortSide ?? 1080;
+  if (!Number.isInteger(minShortSide) || minShortSide < 2 || minShortSide > 8192) {
+    throw new Error('minShortSide must be an integer from 2 to 8192');
+  }
+  checkAbort(signal);
+  validateProject(project);
+  await assertAssets(project);
+  if (session.server) await session.server.assertSourceRoutes({includePublic: true});
+  else {
+    const {timeline, audioSettings} = timelineForRender(project, kind);
+    const assets = await assetsForRender(timeline, signal);
+    session.server = await startAssetServer(assets, {publicDir: timeline.custom?.publicDir});
+    session.timeline = timeline;
+    session.audioSettings = audioSettings;
+  }
+  const {server, audioSettings} = session;
+  let work;
   const {cancelSignal, cancel} = makeCancelSignal();
-  const abort = () => {cancel(); if (browser) void browser.close({silent: true}).catch(() => {});};
+  const abort = () => {cancel(); if (session.browser) void session.browser.close({silent: true}).catch(() => {});};
   signal?.addEventListener('abort', abort, {once: true});
   try {
     checkAbort(signal);
@@ -488,49 +579,11 @@ export async function renderProject(project, options = {}) {
       : await targetPath(`${output}.quality.json`, server.sourcePaths);
     work = await mkdtemp(join(dirname(output), '.agent-video-render-'));
     const partial = join(work, `render${extension}`);
-    let audio;
-    if (kind !== 'still') {
-      const prepared = await prepareVoiceGains(project, timeline, {signal,
-        onProgress: (update) => report(onProgress, {...update, stage: 'audio_voice'})});
-      timeline = prepared.timeline;
-      audio = {enabled: false, settings: audioSettings, scope: 'manual_clip_gains', voice: prepared.report,
-        limitations: ['Automatic voice leveling and complete-master finishing are disabled. Saved manual clip gains still apply.']};
-    }
-    const custom = timeline.custom;
-    const customMode = custom?.mode ?? 'composition';
-    let customLayer;
-    let entryPoint = join(engineRoot, 'src/remotion-entry.ts');
-    if (custom) {
-      if (!isAbsolute(custom.entryPoint)) throw new Error('Custom entryPoint must be an absolute local path');
-      const customEntryPoint = await realpath(custom.entryPoint);
-      if (!(await stat(customEntryPoint)).isFile()) throw new Error('Custom entryPoint is not a regular file');
-      if (customMode === 'layer') customLayer = {entryPoint: customEntryPoint, exportName: custom.exportName ?? 'default'};
-      else {
-        entryPoint = customEntryPoint;
-        if (typeof custom.compositionId !== 'string' || !custom.compositionId) throw new Error('Custom compositionId is required');
-      }
-    }
-    const browserExecutable = await findBrowserExecutable();
-    const inputProps = customMode === 'layer'
-      ? {timeline: {...timeline, assets: server.assets}, customLayerProps: custom?.props ?? {}}
-      : {...(custom?.props ?? {}), timeline: {...timeline, assets: server.assets}};
-    const compositionId = custom && customMode !== 'layer' ? custom.compositionId : 'AgentVideo';
-    report(onProgress, {stage: 'bundle', progress: 0});
-    const serveUrl = await bundle({entryPoint, outDir: join(work, 'bundle'), customLayer,
-      staticBase: server.staticBase, staticFiles: server.staticFiles,
-      onProgress: (progress) => report(onProgress, {stage: 'bundle', progress: progress / 100})});
-    checkAbort(signal);
-    browser = await openBrowser('chrome', {browserExecutable, chromeMode: 'chrome-for-testing',
-      chromiumOptions: {headless: true}, logLevel: 'error'});
-    checkAbort(signal);
-    const composition = await selectComposition({serveUrl, id: compositionId, inputProps,
-      puppeteerInstance: browser, browserExecutable, chromeMode: 'chrome-for-testing', logLevel: 'error'});
-    checkAbort(signal);
-    if (customMode === 'layer' && ['fps', 'width', 'height', 'durationInFrames'].some((key) => composition[key] !== timeline[key])) {
-      throw new Error('Custom layer changed the engine composition clock. Layers must use the supplied timeline.');
-    }
+    const prepared = session.prepared ??= await prepareRender(project, session, {kind, output, signal, onProgress});
+    const {serveUrl, composition, inputProps, browserExecutable, compositionId, custom, customMode} = prepared;
+    let audio = prepared.audio;
     const {dimensions, disallowParallelEncoding} = outputGeometry(composition, scale, kind === 'still');
-    const common = {serveUrl, composition, inputProps, puppeteerInstance: browser,
+    const common = {serveUrl, composition, inputProps, puppeteerInstance: session.browser,
       browserExecutable, chromeMode: 'chrome-for-testing', cancelSignal, scale, disallowParallelEncoding, overwrite: false, logLevel: 'error'};
     let frame, frameRange;
     if (kind === 'still') {
@@ -570,6 +623,7 @@ export async function renderProject(project, options = {}) {
     checkAbort(signal);
     // Catch original media replaced while a long render was in progress, too.
     await assertAssets(project);
+    await server.assertSourceRoutes();
     checkAbort(signal);
     // Hard-link in the destination directory is atomic and refuses to overwrite
     // a file created after the initial existence check.
@@ -597,8 +651,6 @@ export async function renderProject(project, options = {}) {
     throw error;
   } finally {
     signal?.removeEventListener('abort', abort);
-    if (browser) await browser.close({silent: true}).catch(() => {});
-    await server.close();
     if (work) await rm(work, {recursive: true, force: true});
   }
 }
