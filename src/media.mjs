@@ -11,21 +11,31 @@ export const toolEnv = {...process.env, PATH: [...new Set([
   '/usr/bin', '/bin', '/usr/sbin', '/sbin',
 ])].join(delimiter)};
 
-export function run(command, args, {signal, onData, maxOutput = 4 * 1024 * 1024, cwd} = {}) {
+export function run(command, args, {signal, onData, maxOutput = 4 * 1024 * 1024, cwd, env = toolEnv, terminateGroup = false} = {}) {
   return new Promise((resolvePromise, reject) => {
     let stdout = '', stderr = '', settled = false;
-    const child = spawn(command, args, {env: toolEnv, cwd, stdio: ['ignore', 'pipe', 'pipe']});
+    const grouped = terminateGroup && process.platform !== 'win32';
+    const child = spawn(command, args, {env, cwd, detached: grouped, stdio: ['ignore', 'pipe', 'pipe']});
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       signal?.removeEventListener('abort', abort);
+      // The leader can exit before a child that ignored SIGTERM. Do not let
+      // closing the leader's pipes cancel the final process-group cleanup.
+      if (signal?.aborted && grouped) {
+        try { terminate('SIGKILL'); } catch (error) { if (error.code !== 'EPERM') throw error; }
+      }
       clearTimeout(killTimer);
       error ? reject(error) : resolvePromise(value);
     };
     let killTimer;
+    const terminate = sig => {
+      try { if (grouped && child.pid) process.kill(-child.pid, sig); else child.kill(sig); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    };
     const abort = () => {
-      child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 2000);
+      terminate('SIGTERM');
+      killTimer = setTimeout(() => terminate('SIGKILL'), 2000);
       killTimer.unref();
     };
     if (signal?.aborted) abort();

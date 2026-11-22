@@ -202,6 +202,17 @@ export const toolDefinitions = [
       if (!['video', 'audio'].includes(asset.type)) throw Object.assign(new Error('Index a video or audio recording. Still images do not contain takes.'), {code: 'UNSUPPORTED_INDEX_ASSET'});
       return startJob(args.projectDir, {...args, type: 'media_index'});
     }},
+  {name: 'reference_analyze', description: 'Analyze a registered reference video locally using a separately installed REA Video Python package. Returns a durable job and paths to REA evidence and reports, not a finished editing-style handoff. No cloud model or automatic model download. Review frames, sound and uncertainty before explaining the style. Transcribe separately with the existing editor. Optional audio separation requires two verified preinstalled REA models.',
+    schema: {projectDir, expectedRevision, assetId: z.string().min(1), pythonPath: z.string().optional().describe('Absolute Python path containing the REA package; defaults to VIDEO_ENGINE_REA_PYTHON.'),
+      modelsDir: z.string().optional().describe('Directory containing separately installed REA models; defaults to REA_VIDEO_MODELS or its standard cache.'),
+      audioSeparation: z.boolean().default(false), ocr: z.boolean().default(false)}, annotations: edit,
+    run: async args => {
+      const project = await loadProject(args.projectDir);
+      if (project.revision !== args.expectedRevision) throw Object.assign(new Error('Project revision changed. Inspect it before analysis.'), {code: 'STALE_REVISION'});
+      const asset = project.assets.find(item => item.id === args.assetId);
+      if (!asset || asset.type !== 'video') throw Object.assign(new Error('Reference analysis requires a registered video asset.'), {code: 'REFERENCE_ASSET_REQUIRED'});
+      return startJob(args.projectDir, {...args, type: 'reference_analyze'});
+    }},
   {name: 'media_index_get', description: 'Read a saved original-recording map in bounded pages. Returns possible attempts, retake groups, source timestamps and preview hints; optionally returns one timestamped contact sheet as an image. Use the indexId returned by media_index. Normal timeline edits can reuse the map; changed source media or transcript requires reindexing. A possible retake is a repeated phrase, not a quality verdict.',
     schema: {projectDir, indexId: z.string(), offset: z.number().int().nonnegative().default(0),
       limit: z.number().int().min(1).max(50).default(20), sheetPage: z.number().int().nonnegative().default(0),

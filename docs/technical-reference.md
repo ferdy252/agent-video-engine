@@ -114,6 +114,7 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 | `media_add` | `projectDir`, `expectedRevision`, local `path`, optional `addToTimeline` |
 | `media_relink` | `projectDir`, `expectedRevision`, `replacements` with `{assetId, path}` entries |
 | `media_index` | `projectDir`, `expectedRevision`, `assetId`; optional `intervalSeconds`, `maxThumbnails`, `screenText` (macOS video) |
+| `reference_analyze` | `projectDir`, `expectedRevision`, video `assetId`; optional `pythonPath`, `modelsDir`, `audioSeparation`, `ocr` |
 | `media_index_get` | `projectDir`, `indexId`; optional `offset`, `limit`, `sheetPage`, `includePreview` |
 | `media_search` | `projectDir`, `indexId`, `query`; optional `mode` (`spoken` or `screen`), `includePreview`, `offset`, `limit` |
 | `script_cut_draft` | `projectDir`, `expectedRevision`, ordered `assetIds`, ordered `lines` with supplied `text` and optional one-based `take` |
@@ -148,6 +149,12 @@ Source files are never edited. Exports use new filenames and cannot replace an e
 Preview `kind` is `still` or `preview`. Frame ranges use output frames, and source preview bounds use source seconds. Transcription, rendering, delivery and bundle operations return durable job IDs. Follow `job_get` until completion, failure or cancellation. Completed stills can be returned as MCP images using `includePreview`.
 
 Detached workers preserve jobs after a client disconnects. A local loopback socket serializes workers to limit concurrent resource use. Job metadata is saved under the project's `.engine/jobs/`; shared worker state defaults to the engine's `.cache/`, configurable with `VIDEO_ENGINE_RUNTIME`. Failed or interrupted jobs can be retried when their original project revision remains current.
+
+## Analyze a reference video
+
+Register the local reference with `media_add` without adding it to the timeline, then run `reference_analyze` with the resulting revision and asset ID. Poll `job_get` for the REA report, structured breakdown and `VIDEO.md`. Outputs are in a new directory inside `.engine/reference-analyses/`; the reference file and project timeline remain unchanged. Use the report and frames as evidence for an editor-oriented style guide, then inspect the original picture and sound before treating any inferred cut, effect or style as established.
+
+This optional integration requires a separately installed [REA Video](https://github.com/JuneYaooo/rea-video) Python environment. This adapter targets the reviewed source commit `01258b9e85a270dc49d1725819ced6d60228ec7b`; review and test its network and CLI behavior before changing versions. Set `VIDEO_ENGINE_REA_PYTHON` or provide its absolute `pythonPath`. The wrapper disables REA VLM, speech and speaker models and blocks Python network connections and REA model downloads. Its guard applies to the reviewed REA Python implementation; it is not an operating system sandbox for untrusted executables. `ocr` defaults to false; if enabled, the local REA OCR engine must initialize successfully before analysis. Initialization does not prove complete recognition. REA audio separation is off by default. Set `audioSeparation` only after separately provisioning the exact verified REA voice and effects models in the standard cache or `modelsDir`. Existing editor transcription and screen-text tools can be run separately; their results are not automatically injected into REA. An absent REA face model falls back to available local detection or is skipped. Review the report for missing capabilities.
 
 ## Stage and compare edits
 

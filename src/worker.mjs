@@ -95,6 +95,10 @@ try {
   } else if (job.type === 'media_index') {
     const {buildMediaIndex} = await import('./footage-index.mjs');
     result = await buildMediaIndex(job.snapshot, {...job.request, projectDir, signal: controller.signal, onProgress});
+  } else if (job.type === 'reference_analyze') {
+    const {analyzeReference} = await import('./reference-analysis.mjs');
+    result = await analyzeReference(job.snapshot, {...job.request,
+      outputDir: join(projectDir, '.engine/reference-analyses', id), signal: controller.signal, onProgress});
   } else if (job.type === 'color_preview') {
     const {renderColorComparison} = await import('./color-preview.mjs');
     result = await renderColorComparison(job.snapshot, {...job.request,

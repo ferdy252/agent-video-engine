@@ -8,6 +8,7 @@ Describe the video you want in chat. Your agent uses the editor on your computer
 
 - Find possible retakes inside one recording and preview the matching source ranges.
 - Search a screen recording for visible words on macOS. See the matching pictures and source timestamps, even in silent footage.
+- Analyze an editing reference with a separately installed REA Video environment and save its local shot breakdown for review. [Reference-analysis setup](docs/technical-reference.md#analyze-a-reference-video)
 - Build a playable first draft from a supplied script and timed transcripts. Use several takes in one recording, several files, or both.
 - Stage a draft, preview the exact changes and apply it as a saved revision. Compare or restore earlier versions.
 - Cut by transcript words, insert pauses and blend neighboring clips. Add a slide transition with optional motion blur. Start sound before the picture changes or let it continue afterward.
